@@ -27,7 +27,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")  # ID вашего канала (например, -1001234567890)
 DB_DSN = os.getenv("DATABASE_URL")   # Строка подключения к PostgreSQL
 
-SUBSCRIPTION_PRICE_STARS = 15         # Цена подписки в Telegram Stars
+SUBSCRIPTION_PRICE_STARS = int(os.getenv("PRICE_STARS", 15))
 SUBSCRIPTION_DAYS = 30                # Период подписки в днях
 
 # Настройка логирования
