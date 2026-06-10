@@ -20,6 +20,8 @@ import asyncpg
 from dotenv import load_dotenv
 import os
 
+from aiohttp import web
+
 load_dotenv()
 
 # --- Конфигурация ---
@@ -276,6 +278,21 @@ async def cmd_extend(message: types.Message, command: CommandObject):
     await set_user_subscription(user_id, new_end_date)
     await message.answer(f"✅ Подписка пользователя {user_id} продлена до {new_end_date.strftime('%d.%m.%Y')}.")
 
+async def handle_health(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/', handle_health)  # опционально
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
+    await site.start()
+    # бесконечное ожидание, чтобы задача не завершалась
+    await asyncio.Event().wait()
+
+
 # --- Запуск планировщика ---
 async def on_startup():
     await init_db()
@@ -299,3 +316,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    asyncio.create_task(start_web_server())
