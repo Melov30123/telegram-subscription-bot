@@ -47,6 +47,9 @@ CHANNEL_ID = int(require_env("CHANNEL_ID"))
 DATABASE_URL = require_env("DATABASE_URL")
 ADMIN_ID = int(require_env("ADMIN_ID"))
 
+BOT_START_TIME = datetime.now().astimezone()
+LAST_PING = None
+
 PRICE_STARS = int(
     os.getenv("PRICE_STARS", "15")
 )
@@ -348,6 +351,28 @@ async def cmd_start(message: types.Message):
         reply_markup=keyboard
     )
 
+@dp.message(Command("status"))
+async def bot_status(message: types.Message):
+
+    if not await admin_only(message):
+        return
+
+    now = datetime.now().astimezone()
+
+    uptime = now - BOT_START_TIME
+
+    last_ping_text = (
+        str(LAST_PING)
+        if LAST_PING
+        else "ещё не было"
+    )
+
+    await message.answer(
+        "📊 Статус системы\n\n"
+        f"⏱ Аптайм: {uptime}\n"
+        f"📡 Последний ping: {last_ping_text}\n"
+        f"🕒 Сейчас: {now}"
+    )
 
 # ==================================================
 # КНОПКА ПОКУПКИ
@@ -1137,52 +1162,35 @@ class HealthHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
 
+        global LAST_PING
+
         if self.path in ["/", "/health"]:
 
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(
-                b"OK"
-            )
+            self.wfile.write(b"OK")
+
+            LAST_PING = datetime.now().astimezone()
+
+            logger.info("Health check OK")
+
+        elif self.path == "/ping":
+
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"pong")
+
+            LAST_PING = datetime.now().astimezone()
+
+            logger.info("Cron ping received")
 
         else:
 
             self.send_response(404)
             self.end_headers()
 
-
-    # Убираем лишние логи HTTP запросов
-    def log_message(
-        self,
-        format,
-        *args
-    ):
+    def log_message(self, format, *args):
         return
-
-
-
-def run_http_server():
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
-    with socketserver.TCPServer(
-        (
-            "0.0.0.0",
-            port
-        ),
-        HealthHandler
-    ) as server:
-
-        logger.info(
-            f"HTTP сервер запущен на {port}"
-        )
-
-        server.serve_forever()
 
 
 # ==================================================
