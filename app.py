@@ -615,11 +615,21 @@ async def send_reminders():
 
 
 async def kick_from_channel(user_id: int):
-    """
-    Удаление пользователя из канала.
-    """
-
     try:
+        member = await bot.get_chat_member(
+            chat_id=CHANNEL_ID,
+            user_id=user_id
+        )
+
+        if member.status in [
+            "creator",
+            "administrator"
+        ]:
+            logger.warning(
+                f"Пользователь {user_id} является администратором канала. Удаление пропущено."
+            )
+            return
+
         await bot.ban_chat_member(
             chat_id=CHANNEL_ID,
             user_id=user_id
@@ -1026,7 +1036,7 @@ class HealthHandler(
 
     def do_GET(self):
 
-        if self.path == "/health":
+        if self.path in ["/", "/health"]:
 
             self.send_response(200)
 
@@ -1104,11 +1114,14 @@ async def main():
 
     scheduler.start()
 
-
     logger.info(
         "Планировщик запущен"
     )
 
+    # Удаляем возможный старый webhook
+    await bot.delete_webhook(
+        drop_pending_updates=True
+    )
 
     await dp.start_polling(
         bot
