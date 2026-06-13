@@ -47,9 +47,6 @@ CHANNEL_ID = int(require_env("CHANNEL_ID"))
 DATABASE_URL = require_env("DATABASE_URL")
 ADMIN_ID = int(require_env("ADMIN_ID"))
 
-BOT_START_TIME = datetime.now().astimezone()
-LAST_PING = None
-
 PRICE_STARS = int(
     os.getenv("PRICE_STARS", "15")
 )
@@ -351,28 +348,6 @@ async def cmd_start(message: types.Message):
         reply_markup=keyboard
     )
 
-@dp.message(Command("status"))
-async def bot_status(message: types.Message):
-
-    if not await admin_only(message):
-        return
-
-    now = datetime.now().astimezone()
-
-    uptime = now - BOT_START_TIME
-
-    last_ping_text = (
-        str(LAST_PING)
-        if LAST_PING
-        else "ещё не было"
-    )
-
-    await message.answer(
-        "📊 Статус системы\n\n"
-        f"⏱ Аптайм: {uptime}\n"
-        f"📡 Последний ping: {last_ping_text}\n"
-        f"🕒 Сейчас: {now}"
-    )
 
 # ==================================================
 # КНОПКА ПОКУПКИ
@@ -1154,147 +1129,311 @@ async def cmd_remove(
     )
 
 # ==================================================
-# HTTP СЕРВЕР ДЛЯ RENDER
+# АДМИН ПАНЕЛЬ
 # ==================================================
 
 
-class HealthHandler(http.server.SimpleHTTPRequestHandler):
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
 
-    def do_GET(self):
+    if not await admin_only(message):
+        return
 
-        global LAST_PING
+    await message.answer(
+        "👑 Панель администратора\n\n"
+        "/stats — статистика\n"
+        "/balance — баланс Stars\n"
+        "/check ID — проверить подписку\n"
+        "/add ID дни — выдать подписку\n"
+        "/extend ID дни — продлить подписку\n"
+        "/remove ID — удалить подписку"
+    )
 
-        if self.path in ["/", "/health"]:
 
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
+# ==================================================
+# СТАТИСТИКА
+# ==================================================
 
-            LAST_PING = datetime.now().astimezone()
 
-            logger.info("Health check OK")
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
 
-        elif self.path == "/ping":
-
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"pong")
-
-            LAST_PING = datetime.now().astimezone()
-
-            logger.info("Cron ping received")
-
-        else:
-
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
+    if not await admin_only(message):
         return
 
 
+    data = await get_stats()
+
+
+    await message.answer(
+        "📊 Статистика бота\n\n"
+        f"👥 Всего пользователей: {data['users']}\n"
+        f"✅ Активных подписок: {data['active']}\n"
+        f"💳 Всего оплат: {data['payments']}"
+    )
+
+
 # ==================================================
-# ЗАПУСК БОТА
+# БАЛАНС TELEGRAM STARS
 # ==================================================
 
 
-async def main():
+@dp.message(Command("balance"))
+async def cmd_balance(message: types.Message):
 
-    logger.info(
-        "Запуск бота..."
-    )
-
-
-    # Создание PostgreSQL пула
-    await init_db()
-
-
-    # Запускаем HTTP сервер Render
-    threading.Thread(
-        target=run_http_server,
-        daemon=True
-    ).start()
-
-
-    # Планировщик задач
-    scheduler.add_job(
-        check_expired_subscriptions,
-        "interval",
-        hours=1
-    )
-
-
-    scheduler.add_job(
-        send_reminders,
-        CronTrigger(
-            hour=10,
-            minute=0
-        )
-    )
-
-
-    scheduler.start()
-
-
-    logger.info(
-        "Планировщик запущен"
-    )
-
-
-    # Удаляем старый webhook
-    # чтобы не было конфликта
-    await bot.delete_webhook(
-        drop_pending_updates=True
-    )
+    if not await admin_only(message):
+        return
 
 
     try:
 
-        await dp.start_polling(
-            bot
+        balance = await bot.get_my_star_balance()
+
+
+        await message.answer(
+            "⭐ Баланс Telegram Stars\n\n"
+            f"Доступно Stars: {balance.amount}"
         )
 
 
-    finally:
+    except Exception:
 
-        logger.info(
-            "Остановка бота..."
+        logger.exception(
+            "Ошибка получения баланса Stars"
         )
 
 
-        # Закрываем PostgreSQL pool
-        if db_pool:
-
-            await db_pool.close()
-
-            logger.info(
-                "PostgreSQL пул закрыт"
-            )
-
-
-        # Закрываем сессию Telegram
-        await bot.session.close()
-
-        logger.info(
-            "Бот остановлен"
+        await message.answer(
+            "❌ Не удалось получить баланс Stars."
         )
 
 
 # ==================================================
-# ТОЧКА ВХОДА
+# ПРОВЕРКА ПОДПИСКИ
 # ==================================================
 
 
-if __name__ == "__main__":
+@dp.message(Command("check"))
+async def cmd_check(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    if not command.args:
+
+        await message.answer(
+            "Использование:\n/check ID"
+        )
+
+        return
+
 
     try:
 
-        asyncio.run(
-            main()
+        user_id = int(command.args)
+
+
+    except ValueError:
+
+        await message.answer(
+            "ID должен быть числом."
         )
 
-    except KeyboardInterrupt:
+        return
 
-        logger.info(
-            "Бот остановлен вручную"
+
+    data = await get_subscription(user_id)
+
+
+    if not data:
+
+        await message.answer(
+            "Пользователь не найден."
         )
+
+        return
+
+
+    await message.answer(
+        "Информация о пользователе:\n\n"
+        f"ID: {user_id}\n"
+        f"Активна: {'Да' if data['is_active'] else 'Нет'}\n"
+        f"До: {data['subscription_end_date']}"
+    )
+
+
+# ==================================================
+# ДОБАВЛЕНИЕ ПОДПИСКИ
+# ==================================================
+
+
+@dp.message(Command("add"))
+async def cmd_add(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    try:
+
+        user_id, days = map(
+            int,
+            command.args.split()
+        )
+
+
+    except Exception:
+
+        await message.answer(
+            "Использование:\n/add ID дни"
+        )
+
+        return
+
+
+    end_date = (
+        datetime.now().astimezone()
+        + timedelta(days=days)
+    )
+
+
+    await set_subscription(
+        user_id,
+        end_date
+    )
+
+
+    await message.answer(
+        f"✅ Подписка выдана до "
+        f"{end_date.strftime('%d.%m.%Y')}"
+    )
+
+
+# ==================================================
+# ПРОДЛЕНИЕ ПОДПИСКИ
+# ==================================================
+
+
+@dp.message(Command("extend"))
+async def cmd_extend(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    try:
+
+        user_id, days = map(
+            int,
+            command.args.split()
+        )
+
+
+    except Exception:
+
+        await message.answer(
+            "Использование:\n/extend ID дни"
+        )
+
+        return
+
+
+    current = await get_subscription(user_id)
+
+
+    now = datetime.now().astimezone()
+
+
+    if (
+        current
+        and current["is_active"]
+        and current["subscription_end_date"] > now
+    ):
+
+        new_date = (
+            current["subscription_end_date"]
+            + timedelta(days=days)
+        )
+
+
+    else:
+
+        new_date = (
+            now
+            + timedelta(days=days)
+        )
+
+
+    await set_subscription(
+        user_id,
+        new_date
+    )
+
+
+    await message.answer(
+        f"✅ Подписка продлена до "
+        f"{new_date.strftime('%d.%m.%Y')}"
+    )
+
+
+# ==================================================
+# УДАЛЕНИЕ ПОДПИСКИ
+# ==================================================
+
+
+@dp.message(Command("remove"))
+async def cmd_remove(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    if not command.args:
+
+        await message.answer(
+            "Использование:\n/remove ID"
+        )
+
+        return
+
+
+    try:
+
+        user_id = int(command.args)
+
+
+    except ValueError:
+
+        await message.answer(
+            "ID должен быть числом."
+        )
+
+        return
+
+
+    await kick_from_channel(
+        user_id
+    )
+
+
+    await delete_subscription(
+        user_id
+    )
+
+
+    await message.answer(
+        f"✅ Пользователь {user_id} удалён."
+    )
