@@ -318,325 +318,282 @@ async def admin_only(
 
     return True
 
-import asyncio
-import logging
-import os
-import threading
-import http.server
-import socketserver
-
-from datetime import datetime, timedelta
-from typing import Optional
-
-import asyncpg
-from dotenv import load_dotenv
-
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandObject
-from aiogram.types import (
-    LabeledPrice,
-    PreCheckoutQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton
-)
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-
-
 # ==================================================
-# ЗАГРУЗКА ENV
+# /START
 # ==================================================
 
-load_dotenv()
 
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
 
-def require_env(name: str) -> str:
-    value = os.getenv(name)
-
-    if not value:
-        raise RuntimeError(
-            f"Переменная {name} не найдена!"
-        )
-
-    return value
-
-
-BOT_TOKEN = require_env("BOT_TOKEN")
-CHANNEL_ID = int(require_env("CHANNEL_ID"))
-DATABASE_URL = require_env("DATABASE_URL")
-ADMIN_ID = int(require_env("ADMIN_ID"))
-
-PRICE_STARS = int(
-    os.getenv("PRICE_STARS", "15")
-)
-
-SUBSCRIPTION_DAYS = 30
-
-
-# ==================================================
-# ЛОГИ
-# ==================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-logger = logging.getLogger(__name__)
-
-
-# ==================================================
-# BOT
-# ==================================================
-
-bot = Bot(
-    token=BOT_TOKEN
-)
-
-dp = Dispatcher()
-
-scheduler = AsyncIOScheduler()
-
-
-# ==================================================
-# PostgreSQL POOL
-# ==================================================
-
-db_pool: Optional[asyncpg.Pool] = None
-
-
-async def init_db():
-
-    global db_pool
-
-    db_pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=1,
-        max_size=10
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⭐ Купить подписку",
+                    callback_data="buy_subscription"
+                )
+            ]
+        ]
     )
 
-    logger.info(
-        "Пул PostgreSQL создан"
-    )
-
-    async with db_pool.acquire() as conn:
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                subscription_end_date TIMESTAMPTZ,
-                is_active BOOLEAN DEFAULT TRUE
-            )
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS payments (
-                payment_id TEXT PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                amount INTEGER NOT NULL,
-                payload TEXT,
-                created_at TIMESTAMPTZ
-                DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-    logger.info(
-        "База данных готова"
+    await message.answer(
+        "👋 Добро пожаловать!\n\n"
+        "Этот бот выдаёт доступ к закрытому каналу.\n\n"
+        f"⭐ Стоимость подписки: {PRICE_STARS} Stars\n"
+        f"📅 Срок подписки: {SUBSCRIPTION_DAYS} дней\n\n"
+        "📱 Для оплаты используйте приложение Telegram "
+        "на телефоне. В некоторых веб-версиях Telegram "
+        "оплата Stars может не открываться.",
+        reply_markup=keyboard
     )
 
 
 # ==================================================
-# ФУНКЦИИ ПОДПИСОК
+# КНОПКА ПОКУПКИ
 # ==================================================
 
 
-async def get_subscription(
-    user_id: int
+@dp.callback_query(F.data == "buy_subscription")
+async def buy_subscription(
+    callback: types.CallbackQuery
 ):
 
-    async with db_pool.acquire() as conn:
+    await callback.answer(
+        "Создаём счёт на оплату..."
+    )
 
-        return await conn.fetchrow(
-            """
-            SELECT
-                subscription_end_date,
-                is_active
-            FROM users
-            WHERE user_id=$1
-            """,
-            user_id
+    try:
+
+        payload = (
+            f"subscription_"
+            f"{callback.from_user.id}_"
+            f"{int(datetime.now().timestamp())}"
         )
 
-
-async def set_subscription(
-    user_id: int,
-    end_date: datetime
-):
-
-    async with db_pool.acquire() as conn:
-
-        await conn.execute(
-            """
-            INSERT INTO users(
-                user_id,
-                subscription_end_date,
-                is_active
+        prices = [
+            LabeledPrice(
+                label=(
+                    f"Доступ на "
+                    f"{SUBSCRIPTION_DAYS} дней"
+                ),
+                amount=PRICE_STARS
             )
-            VALUES($1,$2,TRUE)
+        ]
 
-            ON CONFLICT(user_id)
-            DO UPDATE SET
-                subscription_end_date=$2,
-                is_active=TRUE
-            """,
-            user_id,
-            end_date
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title="⭐ Подписка на канал",
+            description=(
+                f"Доступ к закрытому каналу "
+                f"на {SUBSCRIPTION_DAYS} дней"
+            ),
+            payload=payload,
+            provider_token="",
+            currency="XTR",
+            prices=prices,
+            start_parameter="subscription"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка создания счёта"
+        )
+
+        await callback.message.answer(
+            "❌ Не удалось открыть оплату.\n\n"
+            "Попробуйте использовать Telegram "
+            "на телефоне."
         )
 
 
-async def deactivate_subscription(
-    user_id: int
+# ==================================================
+# ПОДТВЕРЖДЕНИЕ ОПЛАТЫ
+# ==================================================
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(
+    query: PreCheckoutQuery
 ):
 
-    async with db_pool.acquire() as conn:
-
-        await conn.execute(
-            """
-            UPDATE users
-            SET is_active=FALSE
-            WHERE user_id=$1
-            """,
-            user_id
-        )
-
-
-async def delete_subscription(
-    user_id: int
-):
-
-    async with db_pool.acquire() as conn:
-
-        await conn.execute(
-            """
-            DELETE FROM users
-            WHERE user_id=$1
-            """,
-            user_id
-        )
+    await bot.answer_pre_checkout_query(
+        query.id,
+        ok=True
+    )
 
 
 # ==================================================
-# ФУНКЦИИ ПЛАТЕЖЕЙ
+# УСПЕШНАЯ ОПЛАТА
 # ==================================================
 
 
-async def payment_exists(
-    payment_id: str
-) -> bool:
-
-    async with db_pool.acquire() as conn:
-
-        return await conn.fetchval(
-            """
-            SELECT EXISTS(
-                SELECT 1
-                FROM payments
-                WHERE payment_id=$1
-            )
-            """,
-            payment_id
-        )
-
-
-async def save_payment(
-    payment_id: str,
-    user_id: int,
-    amount: int,
-    payload: str
-):
-
-    async with db_pool.acquire() as conn:
-
-        await conn.execute(
-            """
-            INSERT INTO payments(
-                payment_id,
-                user_id,
-                amount,
-                payload
-            )
-            VALUES($1,$2,$3,$4)
-            """,
-            payment_id,
-            user_id,
-            amount,
-            payload
-        )
-
-
-# ==================================================
-# СТАТИСТИКА БД
-# ==================================================
-
-
-async def get_stats():
-
-    async with db_pool.acquire() as conn:
-
-        users = await conn.fetchval(
-            "SELECT COUNT(*) FROM users"
-        )
-
-        active = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM users
-            WHERE is_active=TRUE
-            """
-        )
-
-        payments = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM payments
-            """
-        )
-
-        return {
-            "users": users,
-            "active": active,
-            "payments": payments
-        }
-
-
-# ==================================================
-# ПРОВЕРКА АДМИНА
-# ==================================================
-
-
-def is_admin(
-    user_id: int
-) -> bool:
-
-    return user_id == ADMIN_ID
-
-
-async def admin_only(
+@dp.message(F.successful_payment)
+async def successful_payment(
     message: types.Message
 ):
 
-    if not is_admin(
-        message.from_user.id
-    ):
+    payment = message.successful_payment
+
+    payment_id = (
+        payment.telegram_payment_charge_id
+    )
+
+    user_id = message.from_user.id
+
+
+    # Защита от повторного получения обновления
+    if await payment_exists(payment_id):
 
         await message.answer(
-            "⛔ Доступ запрещён"
+            "⚠️ Этот платёж уже обработан."
         )
 
-        return False
+        return
 
-    return True
+
+    # Сохраняем платёж
+    await save_payment(
+        payment_id,
+        user_id,
+        payment.total_amount,
+        payment.invoice_payload
+    )
+
+
+    now = datetime.now().astimezone()
+
+
+    # Проверяем существующую подписку
+    current = await get_subscription(
+        user_id
+    )
+
+
+    if (
+        current
+        and current["is_active"]
+        and current["subscription_end_date"]
+        and current["subscription_end_date"] > now
+    ):
+
+        # Продление активной подписки
+        new_end_date = (
+            current["subscription_end_date"]
+            + timedelta(
+                days=SUBSCRIPTION_DAYS
+            )
+        )
+
+    else:
+
+        # Новая подписка
+        new_end_date = (
+            now
+            + timedelta(
+                days=SUBSCRIPTION_DAYS
+            )
+        )
+
+
+    # Сохраняем срок
+    await set_subscription(
+        user_id,
+        new_end_date
+    )
+
+
+    # Создание персональной ссылки
+    try:
+
+        invite = (
+            await bot.create_chat_invite_link(
+                chat_id=CHANNEL_ID,
+                expire_date=new_end_date
+            )
+        )
+
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📢 Войти в канал",
+                        url=invite.invite_link
+                    )
+                ]
+            ]
+        )
+
+
+        await message.answer(
+            "✅ Оплата прошла успешно!\n\n"
+            f"📅 Ваша подписка активна до:\n"
+            f"{new_end_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "👇 Нажмите кнопку ниже, "
+            "чтобы перейти в канал:",
+            reply_markup=keyboard
+        )
+
+
+        logger.info(
+            f"Ссылка выдана пользователю "
+            f"{user_id}"
+        )
+
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка создания ссылки"
+        )
+
+
+        await message.answer(
+            "❌ Оплата получена, но не удалось "
+            "выдать ссылку на канал.\n\n"
+            "Свяжитесь с администратором."
+        )
+
+
+# ==================================================
+# ДОПОЛНИТЕЛЬНО:
+# команда пользователя для проверки статуса
+# ==================================================
+
+
+@dp.message(Command("status"))
+async def my_status(
+    message: types.Message
+):
+
+    data = await get_subscription(
+        message.from_user.id
+    )
+
+
+    if (
+        not data
+        or not data["is_active"]
+    ):
+        await message.answer(
+            "❌ У вас нет активной подписки.\n\n"
+            "Используйте /start для покупки."
+        )
+        return
+
+
+    end_date = data[
+        "subscription_end_date"
+    ]
+
+
+    await message.answer(
+        "✅ Ваша подписка активна.\n\n"
+        f"Действует до:\n"
+        f"{end_date.strftime('%d.%m.%Y %H:%M')}"
+    )
 
 # ==================================================
 # УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ИЗ КАНАЛА
