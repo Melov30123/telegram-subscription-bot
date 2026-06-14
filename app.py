@@ -602,9 +602,7 @@ async def get_all_users():
         )
 
 
-async def get_revenue_last_days(
-    days: int
-):
+async def get_revenue_last_days(days: int):
 
     async with db_pool.acquire() as conn:
 
@@ -614,9 +612,8 @@ async def get_revenue_last_days(
                 SUM(amount),
                 0
             )
-            FROM payments
-            WHERE created_at >
-                NOW() - ($1 || ' days')::INTERVAL
+            FROM successful_payments
+            WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
             """,
             days
         )
