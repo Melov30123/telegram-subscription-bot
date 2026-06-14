@@ -1,137 +1,370 @@
+# =========================================================
+#                 TELEGRAM SUBSCRIPTION BOT V2 PRO
+#                    Render + PostgreSQL + Stars
+# =========================================================
+
 import asyncio
 import logging
 import os
 import threading
 import http.server
 import socketserver
-
-from datetime import datetime, timedelta
+import time
+import traceback
+import platform
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import asyncpg
-from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandObject
-from aiogram.types import (
-    LabeledPrice,
-    PreCheckoutQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton
+from aiogram import (
+    Bot,
+    Dispatcher,
+    F,
+    types
 )
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from aiogram.filters import (
+    Command,
+    CommandObject
+)
+
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    LabeledPrice,
+    PreCheckoutQuery
+)
+
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter
+)
+
+from apscheduler.schedulers.asyncio import (
+    AsyncIOScheduler
+)
+
+from apscheduler.triggers.cron import (
+    CronTrigger
+)
+
+from dotenv import load_dotenv
 
 
-# ==================================================
-# ЗАГРУЗКА ENV
-# ==================================================
+# =========================================================
+#                      ENV
+# =========================================================
 
 load_dotenv()
 
 
-def require_env(name: str) -> str:
+def get_env(name: str) -> str:
+
     value = os.getenv(name)
 
     if not value:
         raise RuntimeError(
-            f"Переменная {name} не найдена!"
+            f"❌ Не найден ENV параметр: {name}"
         )
 
     return value
 
 
-BOT_TOKEN = require_env("BOT_TOKEN")
-CHANNEL_ID = int(require_env("CHANNEL_ID"))
-DATABASE_URL = require_env("DATABASE_URL")
-ADMIN_ID = int(require_env("ADMIN_ID"))
+BOT_TOKEN = get_env("BOT_TOKEN")
 
-PRICE_STARS = int(
-    os.getenv("PRICE_STARS", "15")
+DATABASE_URL = get_env(
+    "DATABASE_URL"
 )
 
-SUBSCRIPTION_DAYS = 30
+CHANNEL_ID = get_env(
+    "CHANNEL_ID"
+)
+
+ADMIN_ID = int(
+    get_env("ADMIN_ID")
+)
 
 
-# ==================================================
-# ЛОГИ
-# ==================================================
+PRICE_STARS = int(
+    os.getenv(
+        "PRICE_STARS",
+        "15"
+    )
+)
+
+
+SUBSCRIPTION_DAYS = int(
+    os.getenv(
+        "SUBSCRIPTION_DAYS",
+        "30"
+    )
+)
+
+
+# =========================================================
+#                      LOGGING
+# =========================================================
+
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format=(
+        "%(asctime)s | "
+        "%(levelname)s | "
+        "%(message)s"
+    )
 )
 
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger(
+    "subscription_bot"
+)
 
 
-# ==================================================
-# BOT
-# ==================================================
+logger.info(
+    "Загрузка конфигурации..."
+)
+
+
+# =========================================================
+#               ГЛОБАЛЬНЫЕ ОБЪЕКТЫ
+# =========================================================
+
 
 bot = Bot(
     token=BOT_TOKEN
 )
 
+
 dp = Dispatcher()
+
 
 scheduler = AsyncIOScheduler()
 
 
-# ==================================================
-# PostgreSQL POOL
-# ==================================================
-
 db_pool: Optional[asyncpg.Pool] = None
 
 
-async def init_db():
+# =========================================================
+#          МОНИТОРИНГ СЕРВЕРА
+# =========================================================
+
+
+START_TIME = datetime.now(
+    timezone.utc
+)
+
+
+LAST_PING = None
+
+
+LAST_DATABASE_CHECK = None
+
+
+# =========================================================
+#               ЗАЩИТА ОТ СПАМА
+# =========================================================
+
+# user_id: timestamp
+BUY_COOLDOWN = {}
+
+
+BUY_TIMEOUT = 5
+
+
+# =========================================================
+#          ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =========================================================
+
+
+def now() -> datetime:
+    """
+    Текущее время UTC
+    """
+
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def format_date(
+    value: datetime
+) -> str:
+
+    if not value:
+        return "Не указано"
+
+
+    return value.strftime(
+        "%d.%m.%Y %H:%M UTC"
+    )
+
+
+def human_time(
+    seconds: int
+) -> str:
+
+    days = seconds // 86400
+
+    seconds %= 86400
+
+
+    hours = seconds // 3600
+
+    seconds %= 3600
+
+
+    minutes = seconds // 60
+
+
+    result = []
+
+
+    if days:
+        result.append(
+            f"{days}д"
+        )
+
+
+    if hours:
+        result.append(
+            f"{hours}ч"
+        )
+
+
+    if minutes:
+        result.append(
+            f"{minutes}м"
+        )
+
+
+    if not result:
+        return "меньше минуты"
+
+
+    return " ".join(result)
+
+
+# =========================================================
+#              ПРОВЕРКА ДОСТУПА АДМИНА
+# =========================================================
+
+
+async def admin_only(
+    message: types.Message
+) -> bool:
+
+    if (
+        message.from_user.id
+        != ADMIN_ID
+    ):
+
+        await message.answer(
+            "⛔ Эта команда доступна только администратору."
+        )
+
+        return False
+
+
+    return True
+
+
+# =========================================================
+#                 СТАРТ СИСТЕМЫ
+# =========================================================
+
+
+logger.info(
+    "Конфигурация успешно загружена"
+)
+
+# =========================================================
+#                  POSTGRESQL DATABASE
+# =========================================================
+
+
+async def init_database():
+    """
+    Создание пула соединений и подготовка базы
+    """
 
     global db_pool
+    global LAST_DATABASE_CHECK
+
+
+    logger.info(
+        "Создание PostgreSQL пула..."
+    )
+
 
     db_pool = await asyncpg.create_pool(
         DATABASE_URL,
         min_size=1,
-        max_size=10
+        max_size=10,
+        command_timeout=30
     )
 
-    logger.info(
-        "Пул PostgreSQL создан"
-    )
 
     async with db_pool.acquire() as conn:
 
+        # Пользователи
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 subscription_end_date TIMESTAMPTZ,
-                is_active BOOLEAN DEFAULT TRUE
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
+
+        # Оплаты
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS payments (
                 payment_id TEXT PRIMARY KEY,
                 user_id BIGINT NOT NULL,
                 amount INTEGER NOT NULL,
                 payload TEXT,
-                created_at TIMESTAMPTZ
-                DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
+
+        # Индексы для ускорения запросов
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_users_active
+            ON users(is_active)
+        """)
+
+
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_users_subscription
+            ON users(subscription_end_date)
+        """)
+
+
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_payments_user
+            ON payments(user_id)
+        """)
+
+
+    LAST_DATABASE_CHECK = now()
+
+
     logger.info(
-        "База данных готова"
+        "PostgreSQL успешно подключён"
     )
 
 
-# ==================================================
-# ФУНКЦИИ ПОДПИСОК
-# ==================================================
+# =========================================================
+#                    ПОЛЬЗОВАТЕЛИ
+# =========================================================
 
 
-async def get_subscription(
+async def get_user(
     user_id: int
 ):
 
@@ -139,11 +372,9 @@ async def get_subscription(
 
         return await conn.fetchrow(
             """
-            SELECT
-                subscription_end_date,
-                is_active
+            SELECT *
             FROM users
-            WHERE user_id=$1
+            WHERE user_id = $1
             """,
             user_id
         )
@@ -158,24 +389,30 @@ async def set_subscription(
 
         await conn.execute(
             """
-            INSERT INTO users(
-                user_id,
-                subscription_end_date,
-                is_active
-            )
-            VALUES($1,$2,TRUE)
+            INSERT INTO users
+                (
+                    user_id,
+                    subscription_end_date,
+                    is_active
+                )
+            VALUES
+                (
+                    $1,
+                    $2,
+                    TRUE
+                )
 
-            ON CONFLICT(user_id)
+            ON CONFLICT (user_id)
             DO UPDATE SET
-                subscription_end_date=$2,
-                is_active=TRUE
+                subscription_end_date = $2,
+                is_active = TRUE
             """,
             user_id,
             end_date
         )
 
 
-async def deactivate_subscription(
+async def deactivate_user(
     user_id: int
 ):
 
@@ -184,14 +421,14 @@ async def deactivate_subscription(
         await conn.execute(
             """
             UPDATE users
-            SET is_active=FALSE
-            WHERE user_id=$1
+            SET is_active = FALSE
+            WHERE user_id = $1
             """,
             user_id
         )
 
 
-async def delete_subscription(
+async def delete_user(
     user_id: int
 ):
 
@@ -200,15 +437,15 @@ async def delete_subscription(
         await conn.execute(
             """
             DELETE FROM users
-            WHERE user_id=$1
+            WHERE user_id = $1
             """,
             user_id
         )
 
 
-# ==================================================
-# ФУНКЦИИ ПЛАТЕЖЕЙ
-# ==================================================
+# =========================================================
+#                     ПЛАТЕЖИ
+# =========================================================
 
 
 async def payment_exists(
@@ -217,16 +454,18 @@ async def payment_exists(
 
     async with db_pool.acquire() as conn:
 
-        return await conn.fetchval(
+        result = await conn.fetchval(
             """
             SELECT EXISTS(
                 SELECT 1
                 FROM payments
-                WHERE payment_id=$1
+                WHERE payment_id = $1
             )
             """,
             payment_id
         )
+
+        return result
 
 
 async def save_payment(
@@ -240,13 +479,21 @@ async def save_payment(
 
         await conn.execute(
             """
-            INSERT INTO payments(
-                payment_id,
-                user_id,
-                amount,
-                payload
-            )
-            VALUES($1,$2,$3,$4)
+            INSERT INTO payments
+                (
+                    payment_id,
+                    user_id,
+                    amount,
+                    payload
+                )
+            VALUES
+                (
+                    $1,
+                    $2,
+                    $3,
+                    $4
+                )
+            ON CONFLICT DO NOTHING
             """,
             payment_id,
             user_id,
@@ -255,76 +502,441 @@ async def save_payment(
         )
 
 
-# ==================================================
-# СТАТИСТИКА БД
-# ==================================================
-
-
-async def get_stats():
+async def get_last_payments(
+    limit: int = 10
+):
 
     async with db_pool.acquire() as conn:
 
-        users = await conn.fetchval(
-            "SELECT COUNT(*) FROM users"
+        return await conn.fetch(
+            """
+            SELECT *
+            FROM payments
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit
         )
 
-        active = await conn.fetchval(
+
+# =========================================================
+#                     СТАТИСТИКА
+# =========================================================
+
+
+async def get_statistics():
+
+    async with db_pool.acquire() as conn:
+
+
+        total_users = await conn.fetchval(
             """
             SELECT COUNT(*)
             FROM users
-            WHERE is_active=TRUE
             """
         )
 
-        payments = await conn.fetchval(
+
+        active_users = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE is_active = TRUE
+            AND subscription_end_date > NOW()
+            """
+        )
+
+
+        expired_users = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE
+                subscription_end_date < NOW()
+            """
+        )
+
+
+        total_stars = await conn.fetchval(
+            """
+            SELECT COALESCE(
+                SUM(amount),
+                0
+            )
+            FROM payments
+            """
+        )
+
+
+        payments_count = await conn.fetchval(
             """
             SELECT COUNT(*)
             FROM payments
             """
         )
 
-        return {
-            "users": users,
-            "active": active,
-            "payments": payments
-        }
+
+    return {
+        "users": total_users,
+        "active": active_users,
+        "expired": expired_users,
+        "payments": payments_count,
+        "stars": total_stars
+    }
 
 
-# ==================================================
-# ПРОВЕРКА АДМИНА
-# ==================================================
+# =========================================================
+#              ДОПОЛНИТЕЛЬНЫЕ ЗАПРОСЫ
+# =========================================================
 
 
-def is_admin(
-    user_id: int
-) -> bool:
+async def get_all_users():
 
-    return user_id == ADMIN_ID
+    async with db_pool.acquire() as conn:
+
+        return await conn.fetch(
+            """
+            SELECT user_id
+            FROM users
+            """
+        )
 
 
-async def admin_only(
-    message: types.Message
+async def get_revenue_last_days(
+    days: int
 ):
 
-    if not is_admin(
-        message.from_user.id
-    ):
+    async with db_pool.acquire() as conn:
 
-        await message.answer(
-            "⛔ Доступ запрещён"
+        return await conn.fetchval(
+            """
+            SELECT COALESCE(
+                SUM(amount),
+                0
+            )
+            FROM payments
+            WHERE created_at >
+                NOW() - ($1 || ' days')::INTERVAL
+            """,
+            days
+        )
+
+
+# =========================================================
+#                  ПРОВЕРКА БАЗЫ
+# =========================================================
+
+
+async def database_health():
+
+    global LAST_DATABASE_CHECK
+
+
+    try:
+
+        async with db_pool.acquire() as conn:
+
+            await conn.execute(
+                "SELECT 1"
+            )
+
+
+        LAST_DATABASE_CHECK = now()
+
+
+        return True
+
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка проверки базы данных"
         )
 
         return False
 
-    return True
 
-# ==================================================
-# /START
-# ==================================================
+logger.info(
+    "Модуль базы данных загружен"
+)
+
+# =========================================================
+#                   HTTP SERVER / RENDER
+# =========================================================
+
+import json
+import sys
+
+
+# =========================================================
+#                ИНФОРМАЦИЯ О СИСТЕМЕ
+# =========================================================
+
+
+def get_system_info():
+
+    uptime_seconds = int(
+        (now() - START_TIME).total_seconds()
+    )
+
+    return {
+        "status": "ok",
+        "bot_uptime": human_time(
+            uptime_seconds
+        ),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "last_ping": (
+            format_date(LAST_PING)
+            if LAST_PING
+            else "никогда"
+        ),
+        "database": (
+            "online"
+            if LAST_DATABASE_CHECK
+            else "unknown"
+        )
+    }
+
+
+# =========================================================
+#                  HTTP HANDLER
+# =========================================================
+
+
+class HealthHandler(
+    http.server.BaseHTTPRequestHandler
+):
+
+    def do_GET(self):
+
+        global LAST_PING
+
+
+        # Главная страница
+        if self.path == "/":
+
+            self.send_response(200)
+
+            self.send_header(
+                "Content-Type",
+                "application/json"
+            )
+
+            self.end_headers()
+
+            self.wfile.write(
+                json.dumps(
+                    get_system_info()
+                ).encode()
+            )
+
+            return
+
+
+        # Render Health Check
+        if self.path == "/health":
+
+            self.send_response(200)
+
+            self.end_headers()
+
+            self.wfile.write(
+                b"OK"
+            )
+
+            return
+
+
+        # Cron ping
+        if self.path == "/ping":
+
+            LAST_PING = now()
+
+            logger.info(
+                "Получен cron ping"
+            )
+
+            self.send_response(200)
+
+            self.end_headers()
+
+            self.wfile.write(
+                b"PONG"
+            )
+
+            return
+
+
+        # Метрики сервера
+        if self.path == "/metrics":
+
+            data = get_system_info()
+
+
+            self.send_response(200)
+
+            self.send_header(
+                "Content-Type",
+                "application/json"
+            )
+
+            self.end_headers()
+
+            self.wfile.write(
+                json.dumps(
+                    data,
+                    indent=4,
+                    ensure_ascii=False
+                ).encode("utf-8")
+            )
+
+            return
+
+
+        # Всё остальное
+        self.send_response(404)
+
+        self.end_headers()
+
+
+    # Убираем мусорные логи
+    def log_message(
+        self,
+        format,
+        *args
+    ):
+        return
+
+
+# =========================================================
+#                ЗАПУСК HTTP СЕРВЕРА
+# =========================================================
+
+
+def run_http_server():
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000"
+        )
+    )
+
+
+    server = socketserver.TCPServer(
+        (
+            "0.0.0.0",
+            port
+        ),
+        HealthHandler
+    )
+
+
+    logger.info(
+        f"HTTP сервер запущен на порту {port}"
+    )
+
+
+    try:
+
+        server.serve_forever()
+
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка HTTP сервера"
+        )
+
+
+    finally:
+
+        server.server_close()
+
+        logger.info(
+            "HTTP сервер остановлен"
+        )
+
+
+# =========================================================
+#                ДОПОЛНИТЕЛЬНЫЙ МОНИТОРИНГ
+# =========================================================
+
+
+async def monitor_system():
+
+    while True:
+
+        try:
+
+            db_status = (
+                await database_health()
+            )
+
+
+            logger.info(
+                "SYSTEM CHECK | "
+                f"DB: {'OK' if db_status else 'ERROR'} | "
+                f"UPTIME: {human_time(int((now() - START_TIME).total_seconds()))}"
+            )
+
+
+        except Exception:
+
+            logger.exception(
+                "Ошибка мониторинга системы"
+            )
+
+
+        # Проверяем каждые 10 минут
+        await asyncio.sleep(
+            600
+        )
+
+
+logger.info(
+    "HTTP и мониторинг загружены"
+)
+
+# =========================================================
+#                 ПРОВЕРКА КАНАЛА
+# =========================================================
+
+
+async def check_channel_access():
+
+    try:
+
+        chat = await bot.get_chat(
+            CHANNEL_ID
+        )
+
+        logger.info(
+            f"Канал найден: {chat.title} ({chat.id})"
+        )
+
+        return True
+
+
+    except Exception:
+
+        logger.exception(
+            "Бот не имеет доступа к каналу"
+        )
+
+        return False
+
+
+# =========================================================
+#                      /START
+# =========================================================
 
 
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(
+    message: types.Message
+):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -337,56 +949,85 @@ async def cmd_start(message: types.Message):
         ]
     )
 
+
     await message.answer(
         "👋 Добро пожаловать!\n\n"
-        "Этот бот выдаёт доступ к закрытому каналу.\n\n"
-        f"⭐ Стоимость подписки: {PRICE_STARS} Stars\n"
-        f"📅 Срок подписки: {SUBSCRIPTION_DAYS} дней\n\n"
-        "📱 Для оплаты используйте приложение Telegram "
-        "на телефоне. В некоторых веб-версиях Telegram "
-        "оплата Stars может не открываться.",
+        "Это бот для доступа в закрытый канал.\n\n"
+        f"⭐ Стоимость: {PRICE_STARS} Stars\n"
+        f"📅 Срок: {SUBSCRIPTION_DAYS} дней\n\n"
+        "После оплаты вы получите персональную ссылку "
+        "для вступления в канал.",
         reply_markup=keyboard
     )
 
 
-# ==================================================
-# КНОПКА ПОКУПКИ
-# ==================================================
+# =========================================================
+#                 КНОПКА ПОКУПКИ
+# =========================================================
 
 
-@dp.callback_query(F.data == "buy_subscription")
+@dp.callback_query(
+    F.data == "buy_subscription"
+)
 async def buy_subscription(
     callback: types.CallbackQuery
 ):
 
-    await callback.answer(
-        "Создаём счёт на оплату..."
+    user_id = callback.from_user.id
+
+    current_time = time.time()
+
+
+    # Антиспам нажатий
+    last_click = BUY_COOLDOWN.get(
+        user_id
     )
+
+
+    if (
+        last_click
+        and current_time - last_click < BUY_TIMEOUT
+    ):
+
+        await callback.answer(
+            "⏳ Подождите несколько секунд",
+            show_alert=True
+        )
+
+        return
+
+
+    BUY_COOLDOWN[user_id] = current_time
+
+
+    await callback.answer(
+        "Создаём счёт..."
+    )
+
 
     try:
 
         payload = (
             f"subscription_"
-            f"{callback.from_user.id}_"
-            f"{int(datetime.now().timestamp())}"
+            f"{user_id}_"
+            f"{int(current_time)}"
         )
+
 
         prices = [
             LabeledPrice(
-                label=(
-                    f"Доступ на "
-                    f"{SUBSCRIPTION_DAYS} дней"
-                ),
+                label=f"Доступ на {SUBSCRIPTION_DAYS} дней",
                 amount=PRICE_STARS
             )
         ]
 
+
         await bot.send_invoice(
-            chat_id=callback.from_user.id,
+            chat_id=user_id,
             title="⭐ Подписка на канал",
             description=(
-                f"Доступ к закрытому каналу "
-                f"на {SUBSCRIPTION_DAYS} дней"
+                f"Доступ на "
+                f"{SUBSCRIPTION_DAYS} дней"
             ),
             payload=payload,
             provider_token="",
@@ -395,26 +1036,32 @@ async def buy_subscription(
             start_parameter="subscription"
         )
 
+
+        logger.info(
+            f"Создан счёт для пользователя {user_id}"
+        )
+
+
     except Exception:
 
         logger.exception(
             "Ошибка создания счёта"
         )
 
+
         await callback.message.answer(
-            "❌ Не удалось открыть оплату.\n\n"
-            "Попробуйте использовать Telegram "
-            "на телефоне."
+            "❌ Не удалось создать оплату.\n"
+            "Попробуйте позже."
         )
 
 
-# ==================================================
-# ПОДТВЕРЖДЕНИЕ ОПЛАТЫ
-# ==================================================
+# =========================================================
+#              ПОДТВЕРЖДЕНИЕ ОПЛАТЫ
+# =========================================================
 
 
 @dp.pre_checkout_query()
-async def pre_checkout(
+async def process_pre_checkout(
     query: PreCheckoutQuery
 ):
 
@@ -424,9 +1071,9 @@ async def pre_checkout(
     )
 
 
-# ==================================================
-# УСПЕШНАЯ ОПЛАТА
-# ==================================================
+# =========================================================
+#                 УСПЕШНАЯ ОПЛАТА
+# =========================================================
 
 
 @dp.message(F.successful_payment)
@@ -436,15 +1083,21 @@ async def successful_payment(
 
     payment = message.successful_payment
 
+    user_id = message.from_user.id
+
     payment_id = (
         payment.telegram_payment_charge_id
     )
 
-    user_id = message.from_user.id
 
+    # Защита от повторной обработки
+    if await payment_exists(
+        payment_id
+    ):
 
-    # Защита от повторного получения обновления
-    if await payment_exists(payment_id):
+        logger.warning(
+            f"Повторный платёж: {payment_id}"
+        )
 
         await message.answer(
             "⚠️ Этот платёж уже обработан."
@@ -453,7 +1106,7 @@ async def successful_payment(
         return
 
 
-    # Сохраняем платёж
+    # Сохраняем оплату
     await save_payment(
         payment_id,
         user_id,
@@ -462,56 +1115,65 @@ async def successful_payment(
     )
 
 
-    now = datetime.now().astimezone()
-
-
-    # Проверяем существующую подписку
-    current = await get_subscription(
+    current_user = await get_user(
         user_id
     )
 
 
+    current_time = now()
+
+
+    # Продление подписки
     if (
-        current
-        and current["is_active"]
-        and current["subscription_end_date"]
-        and current["subscription_end_date"] > now
+        current_user
+        and current_user["is_active"]
+        and current_user["subscription_end_date"]
+        and current_user["subscription_end_date"] > current_time
     ):
 
-        # Продление активной подписки
-        new_end_date = (
-            current["subscription_end_date"]
+        new_end = (
+            current_user["subscription_end_date"]
             + timedelta(
                 days=SUBSCRIPTION_DAYS
             )
         )
+
+        logger.info(
+            f"Продлена подписка {user_id}"
+        )
+
 
     else:
 
-        # Новая подписка
-        new_end_date = (
-            now
+        new_end = (
+            current_time
             + timedelta(
                 days=SUBSCRIPTION_DAYS
             )
         )
 
+        logger.info(
+            f"Новая подписка {user_id}"
+        )
 
-    # Сохраняем срок
+
     await set_subscription(
         user_id,
-        new_end_date
+        new_end
     )
 
 
-    # Создание персональной ссылки
+# =========================================================
+#            СОЗДАНИЕ ССЫЛКИ НА КАНАЛ
+# =========================================================
+
     try:
 
-        invite = (
-            await bot.create_chat_invite_link(
-                chat_id=CHANNEL_ID,
-                expire_date=new_end_date
-            )
+        invite = await bot.create_chat_invite_link(
+            chat_id=CHANNEL_ID,
+            name=f"user_{user_id}",
+            expire_date=new_end,
+            member_limit=1
         )
 
 
@@ -529,21 +1191,20 @@ async def successful_payment(
 
         await message.answer(
             "✅ Оплата прошла успешно!\n\n"
-            f"📅 Ваша подписка активна до:\n"
-            f"{new_end_date.strftime('%d.%m.%Y %H:%M')}\n\n"
-            "👇 Нажмите кнопку ниже, "
-            "чтобы перейти в канал:",
+            f"📅 Доступ активен до:\n"
+            f"{format_date(new_end)}\n\n"
+            "Нажмите кнопку ниже, "
+            "чтобы вступить в канал:",
             reply_markup=keyboard
         )
 
 
         logger.info(
-            f"Ссылка выдана пользователю "
-            f"{user_id}"
+            f"Выдана ссылка пользователю {user_id}"
         )
 
 
-    except Exception:
+    except TelegramBadRequest as e:
 
         logger.exception(
             "Ошибка создания ссылки"
@@ -551,53 +1212,463 @@ async def successful_payment(
 
 
         await message.answer(
-            "❌ Оплата получена, но не удалось "
-            "выдать ссылку на канал.\n\n"
-            "Свяжитесь с администратором."
+            "❌ Оплата получена, но ссылка "
+            "не была создана.\n\n"
+            "Сообщите администратору."
         )
 
 
-# ==================================================
-# ДОПОЛНИТЕЛЬНО:
-# команда пользователя для проверки статуса
-# ==================================================
+    except Exception:
+
+        logger.exception(
+            "Неизвестная ошибка выдачи ссылки"
+        )
 
 
-@dp.message(Command("status"))
-async def my_status(
+        await message.answer(
+            "❌ Внутренняя ошибка сервера."
+        )
+
+
+# =========================================================
+#                 ПРОВЕРКА ПОДПИСКИ
+# =========================================================
+
+
+@dp.message(Command("my"))
+async def my_subscription(
     message: types.Message
 ):
 
-    data = await get_subscription(
+    user = await get_user(
         message.from_user.id
     )
 
 
     if (
-        not data
-        or not data["is_active"]
+        not user
+        or not user["is_active"]
+        or not user["subscription_end_date"]
+        or user["subscription_end_date"] < now()
     ):
+
         await message.answer(
             "❌ У вас нет активной подписки.\n\n"
             "Используйте /start для покупки."
         )
+
         return
 
 
-    end_date = data[
-        "subscription_end_date"
-    ]
+    left = (
+        user["subscription_end_date"]
+        - now()
+    ).days
 
 
     await message.answer(
-        "✅ Ваша подписка активна.\n\n"
-        f"Действует до:\n"
-        f"{end_date.strftime('%d.%m.%Y %H:%M')}"
+        "✅ Ваша подписка активна\n\n"
+        f"📅 До: {format_date(user['subscription_end_date'])}\n"
+        f"⏳ Осталось дней: {left}"
     )
 
-# ==================================================
-# УДАЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ИЗ КАНАЛА
-# ==================================================
+
+logger.info(
+    "Пользовательские команды и платежи загружены"
+)
+
+# =========================================================
+#                    АДМИН ПАНЕЛЬ
+# =========================================================
+
+
+@dp.message(Command("admin"))
+async def admin_panel(
+    message: types.Message
+):
+
+    if not await admin_only(message):
+        return
+
+
+    await message.answer(
+        "👑 Панель администратора\n\n"
+        "Команды:\n\n"
+        "/stats — статистика\n"
+        "/revenue — доход\n"
+        "/payments — последние оплаты\n"
+        "/users — список пользователей\n"
+        "/check ID — проверить пользователя\n"
+        "/add ID дни — выдать подписку\n"
+        "/extend ID дни — продлить подписку\n"
+        "/remove ID — удалить подписку\n"
+        "/kick ID — удалить из канала"
+    )
+
+
+# =========================================================
+#                     СТАТИСТИКА
+# =========================================================
+
+
+@dp.message(Command("stats"))
+async def stats(
+    message: types.Message
+):
+
+    if not await admin_only(message):
+        return
+
+
+    data = await get_statistics()
+
+
+    await message.answer(
+        "📊 Статистика бота\n\n"
+        f"👥 Всего пользователей: {data['users']}\n"
+        f"✅ Активных подписок: {data['active']}\n"
+        f"❌ Просроченных: {data['expired']}\n\n"
+        f"💳 Оплат: {data['payments']}\n"
+        f"⭐ Получено Stars: {data['stars']}"
+    )
+
+
+# =========================================================
+#                    ДОХОД
+# =========================================================
+
+
+@dp.message(Command("revenue"))
+async def revenue(
+    message: types.Message
+):
+
+    if not await admin_only(message):
+        return
+
+
+    day = await get_revenue_last_days(1)
+    month = await get_revenue_last_days(30)
+
+
+    await message.answer(
+        "💰 Доход\n\n"
+        f"⭐ За сутки: {day}\n"
+        f"⭐ За 30 дней: {month}"
+    )
+
+
+# =========================================================
+#                 ПОСЛЕДНИЕ ПЛАТЕЖИ
+# =========================================================
+
+
+@dp.message(Command("payments"))
+async def payments(
+    message: types.Message
+):
+
+    if not await admin_only(message):
+        return
+
+
+    rows = await get_last_payments(10)
+
+
+    if not rows:
+        await message.answer(
+            "Платежей пока нет."
+        )
+        return
+
+
+    text = "💳 Последние платежи:\n\n"
+
+
+    for p in rows:
+
+        text += (
+            f"👤 {p['user_id']}\n"
+            f"⭐ {p['amount']} Stars\n"
+            f"📅 {format_date(p['created_at'])}\n\n"
+        )
+
+
+    await message.answer(text)
+
+
+# =========================================================
+#              СПИСОК ПОЛЬЗОВАТЕЛЕЙ
+# =========================================================
+
+
+@dp.message(Command("users"))
+async def users(
+    message: types.Message
+):
+
+    if not await admin_only(message):
+        return
+
+
+    rows = await get_all_users()
+
+
+    if not rows:
+
+        await message.answer(
+            "База пользователей пуста."
+        )
+
+        return
+
+
+    text = "👥 Пользователи:\n\n"
+
+
+    for user in rows[:100]:
+
+        text += (
+            f"🆔 {user['user_id']}\n"
+        )
+
+
+    if len(rows) > 100:
+
+        text += (
+            f"\nИ ещё {len(rows)-100} пользователей..."
+        )
+
+
+    await message.answer(text)
+
+
+# =========================================================
+#              ПРОВЕРКА ПОЛЬЗОВАТЕЛЯ
+# =========================================================
+
+
+@dp.message(Command("check"))
+async def check_user(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    if not command.args:
+
+        await message.answer(
+            "Использование:\n/check USER_ID"
+        )
+
+        return
+
+
+    try:
+
+        user_id = int(command.args)
+
+    except ValueError:
+
+        await message.answer(
+            "ID должен быть числом."
+        )
+
+        return
+
+
+    user = await get_user(user_id)
+
+
+    if not user:
+
+        await message.answer(
+            "Пользователь не найден."
+        )
+
+        return
+
+
+    status = (
+        "Активна"
+        if user["is_active"]
+        else "Отключена"
+    )
+
+
+    await message.answer(
+        "👤 Пользователь\n\n"
+        f"ID: {user_id}\n"
+        f"Статус: {status}\n"
+        f"До: {format_date(user['subscription_end_date'])}"
+    )
+
+
+# =========================================================
+#              ВЫДАЧА ПОДПИСКИ
+# =========================================================
+
+
+@dp.message(Command("add"))
+async def add_subscription(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    try:
+
+        uid, days = map(
+            int,
+            command.args.split()
+        )
+
+    except Exception:
+
+        await message.answer(
+            "Использование:\n/add USER_ID ДНИ"
+        )
+
+        return
+
+
+    end = now() + timedelta(days=days)
+
+
+    await set_subscription(
+        uid,
+        end
+    )
+
+
+    await message.answer(
+        f"✅ Подписка выдана\n"
+        f"ID: {uid}\n"
+        f"До: {format_date(end)}"
+    )
+
+
+# =========================================================
+#           ПРОДОЛЖЕНИЕ В ЧАСТИ 6/8
+# =========================================================
+
+# =========================================================
+#              ПРОДЛЕНИЕ ПОДПИСКИ
+# =========================================================
+
+
+@dp.message(Command("extend"))
+async def extend_subscription(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    try:
+
+        uid, days = map(
+            int,
+            command.args.split()
+        )
+
+    except Exception:
+
+        await message.answer(
+            "Использование:\n/extend USER_ID ДНИ"
+        )
+        return
+
+
+    user = await get_user(uid)
+
+
+    if (
+        user
+        and user["is_active"]
+        and user["subscription_end_date"]
+        and user["subscription_end_date"] > now()
+    ):
+
+        end_date = (
+            user["subscription_end_date"]
+            + timedelta(days=days)
+        )
+
+    else:
+
+        end_date = (
+            now()
+            + timedelta(days=days)
+        )
+
+
+    await set_subscription(
+        uid,
+        end_date
+    )
+
+
+    await message.answer(
+        "✅ Подписка продлена\n\n"
+        f"ID: {uid}\n"
+        f"До: {format_date(end_date)}"
+    )
+
+
+# =========================================================
+#              УДАЛЕНИЕ ПОДПИСКИ
+# =========================================================
+
+
+@dp.message(Command("remove"))
+async def remove_subscription(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    if not command.args:
+
+        await message.answer(
+            "Использование:\n/remove USER_ID"
+        )
+        return
+
+
+    try:
+        uid = int(command.args)
+
+    except ValueError:
+
+        await message.answer(
+            "ID должен быть числом."
+        )
+        return
+
+
+    await deactivate_user(uid)
+
+
+    await message.answer(
+        f"❌ Подписка пользователя {uid} отключена."
+    )
+
+
+# =========================================================
+#              УДАЛЕНИЕ ИЗ КАНАЛА
+# =========================================================
 
 
 async def kick_from_channel(
@@ -607,35 +1678,33 @@ async def kick_from_channel(
     try:
 
         member = await bot.get_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id
+            CHANNEL_ID,
+            user_id
         )
 
 
-        # Telegram не позволяет банить владельца и админов
-        if member.status in (
-            "creator",
-            "administrator"
-        ):
+        # Защита админов канала
+        if member.status in [
+            "administrator",
+            "creator"
+        ]:
 
             logger.warning(
-                f"Пользователь {user_id} является администратором канала. "
-                "Удаление пропущено."
+                f"Попытка удалить администратора {user_id}"
             )
 
-            return
+            return False
 
 
-        # Бан + разбан = удаление из канала
         await bot.ban_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id
+            CHANNEL_ID,
+            user_id
         )
 
 
         await bot.unban_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id
+            CHANNEL_ID,
+            user_id
         )
 
 
@@ -644,17 +1713,210 @@ async def kick_from_channel(
         )
 
 
+        return True
+
+
+    except TelegramBadRequest as e:
+
+        logger.warning(
+            f"Ошибка удаления {user_id}: {e}"
+        )
+
+        return False
+
+
     except Exception:
 
         logger.exception(
-            f"Ошибка удаления пользователя {user_id}"
+            "Ошибка удаления из канала"
+        )
+
+        return False
+
+
+@dp.message(Command("kick"))
+async def kick_command(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    if not command.args:
+
+        await message.answer(
+            "Использование:\n/kick USER_ID"
+        )
+
+        return
+
+
+    try:
+
+        uid = int(command.args)
+
+    except ValueError:
+
+        await message.answer(
+            "ID должен быть числом."
+        )
+
+        return
+
+
+    result = await kick_from_channel(uid)
+
+
+    if result:
+
+        await message.answer(
+            "✅ Пользователь удалён из канала."
+        )
+
+    else:
+
+        await message.answer(
+            "⚠️ Не удалось удалить пользователя."
         )
 
 
-# ==================================================
-# ПРОВЕРКА ПРОСРОЧЕННЫХ ПОДПИСОК
-# Запускается автоматически каждый час
-# ==================================================
+# =========================================================
+#                   РАССЫЛКА
+# =========================================================
+
+
+@dp.message(Command("broadcast"))
+async def broadcast(
+    message: types.Message,
+    command: CommandObject
+):
+
+    if not await admin_only(message):
+        return
+
+
+    if not command.args:
+
+        await message.answer(
+            "Использование:\n/broadcast текст"
+        )
+
+        return
+
+
+    users = await get_all_users()
+
+
+    total = len(users)
+    success = 0
+    failed = 0
+
+
+    status_message = await message.answer(
+        f"📨 Начинаю рассылку\n"
+        f"Получателей: {total}"
+    )
+
+
+    for user in users:
+
+        uid = user["user_id"]
+
+
+        try:
+
+            await bot.send_message(
+                uid,
+                command.args
+            )
+
+            success += 1
+
+
+            # Защита от лимитов Telegram
+            await asyncio.sleep(0.05)
+
+
+        except TelegramForbiddenError:
+
+            failed += 1
+
+
+        except TelegramRetryAfter as e:
+
+            logger.warning(
+                f"Flood control: ждём {e.retry_after}"
+            )
+
+            await asyncio.sleep(
+                e.retry_after
+            )
+
+            try:
+
+                await bot.send_message(
+                    uid,
+                    command.args
+                )
+
+                success += 1
+
+            except Exception:
+
+                failed += 1
+
+
+        except Exception:
+
+            logger.exception(
+                f"Ошибка отправки {uid}"
+            )
+
+            failed += 1
+
+
+    await status_message.edit_text(
+        "✅ Рассылка завершена\n\n"
+        f"Успешно: {success}\n"
+        f"Ошибок: {failed}"
+    )
+
+
+# =========================================================
+#              КОНЕЦ АДМИН-ПАНЕЛИ
+# =========================================================
+
+
+logger.info(
+    "Админ-панель загружена"
+)
+
+# =========================================================
+#              УВЕДОМЛЕНИЕ АДМИНИСТРАТОРА
+# =========================================================
+
+
+async def notify_admin(text: str):
+
+    try:
+
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚠️ Системное уведомление\n\n{text}"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Не удалось отправить сообщение администратору"
+        )
+
+
+# =========================================================
+#          ПРОВЕРКА ПРОСРОЧЕННЫХ ПОДПИСОК
+# =========================================================
 
 
 async def check_expired_subscriptions():
@@ -664,776 +1926,531 @@ async def check_expired_subscriptions():
     )
 
 
-    async with db_pool.acquire() as conn:
+    try:
 
-        expired_users = await conn.fetch(
-            """
-            SELECT user_id
-            FROM users
-            WHERE
-                is_active = TRUE
-                AND subscription_end_date < NOW()
-            """
-        )
+        async with db_pool.acquire() as conn:
 
-
-    for row in expired_users:
-
-        user_id = row["user_id"]
-
-
-        await kick_from_channel(
-            user_id
-        )
-
-
-        await deactivate_subscription(
-            user_id
-        )
-
-
-        try:
-
-            await bot.send_message(
-                user_id,
-                "⛔ Ваша подписка закончилась.\n\n"
-                "Доступ к каналу закрыт.\n"
-                "Используйте /start для продления."
+            users = await conn.fetch(
+                """
+                SELECT user_id
+                FROM users
+                WHERE
+                    is_active = TRUE
+                    AND subscription_end_date < NOW()
+                """
             )
 
 
-        except Exception:
-
-            logger.warning(
-                f"Не удалось отправить уведомление "
-                f"пользователю {user_id}"
-            )
+        removed = 0
 
 
-# ==================================================
-# НАПОМИНАНИЯ О ЗАКАНЧИВАЮЩЕЙСЯ ПОДПИСКЕ
-# Запускается каждый день
-# ==================================================
+        for user in users:
+
+            user_id = user["user_id"]
+
+
+            try:
+
+                # Удаляем из канала
+                await kick_from_channel(
+                    user_id
+                )
+
+
+                # Отключаем подписку
+                await deactivate_user(
+                    user_id
+                )
+
+
+                removed += 1
+
+
+            except Exception:
+
+                logger.exception(
+                    f"Ошибка обработки пользователя {user_id}"
+                )
+
+
+        logger.info(
+            f"Проверка завершена. Отключено: {removed}"
+        )
+
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка проверки подписок"
+        )
+
+        await notify_admin(
+            "Ошибка при проверке просроченных подписок"
+        )
+
+
+# =========================================================
+#              НАПОМИНАНИЯ О ПРОДЛЕНИИ
+# =========================================================
 
 
 async def send_reminders():
 
     logger.info(
-        "Проверка напоминаний..."
+        "Отправка напоминаний..."
     )
 
 
-    now = datetime.now().astimezone()
+    try:
+
+        async with db_pool.acquire() as conn:
+
+            users = await conn.fetch(
+                """
+                SELECT user_id, subscription_end_date
+                FROM users
+                WHERE is_active = TRUE
+                """
+            )
 
 
-    async with db_pool.acquire() as conn:
-
-        users = await conn.fetch(
-            """
-            SELECT
-                user_id,
-                subscription_end_date
-            FROM users
-            WHERE is_active = TRUE
-            """
-        )
+        sent = 0
 
 
-    for user in users:
+        for user in users:
 
-        user_id = user["user_id"]
-
-
-        end_date = user[
-            "subscription_end_date"
-        ].astimezone()
+            end_date = (
+                user["subscription_end_date"]
+            )
 
 
-        days_left = (
-            end_date - now
-        ).days
+            if not end_date:
+                continue
 
 
-        try:
+            days_left = (
+                end_date - now()
+            ).days
 
-            if days_left == 3:
 
-                await bot.send_message(
-                    user_id,
-                    "🔔 Напоминание!\n\n"
-                    "До окончания вашей подписки "
-                    "осталось 3 дня.\n\n"
-                    "Используйте /start, "
-                    "чтобы продлить доступ."
+            text = None
+
+
+            if days_left == 7:
+
+                text = (
+                    "🔔 Ваша подписка закончится через 7 дней.\n\n"
+                    "Продлите её заранее через /start"
+                )
+
+
+            elif days_left == 3:
+
+                text = (
+                    "⏳ До окончания подписки осталось 3 дня.\n\n"
+                    "Не забудьте продлить доступ."
                 )
 
 
             elif days_left == 1:
 
-                await bot.send_message(
-                    user_id,
-                    "⚠️ Ваша подписка закончится "
-                    "завтра.\n\n"
-                    "Продлите её заранее через /start."
+                text = (
+                    "⚠️ Завтра ваша подписка закончится.\n\n"
+                    "Продлите доступ, чтобы не потерять канал."
                 )
+
+
+            elif days_left == 0:
+
+                text = (
+                    "❗ Сегодня последний день вашей подписки."
+                )
+
+
+            if text:
+
+                try:
+
+                    await bot.send_message(
+                        user["user_id"],
+                        text
+                    )
+
+
+                    sent += 1
+
+
+                    await asyncio.sleep(
+                        0.05
+                    )
+
+
+                except TelegramForbiddenError:
+
+                    logger.warning(
+                        f"Пользователь {user['user_id']} заблокировал бота"
+                    )
+
+
+                except Exception:
+
+                    logger.exception(
+                        f"Ошибка отправки напоминания {user['user_id']}"
+                    )
+
+
+        logger.info(
+            f"Напоминаний отправлено: {sent}"
+        )
+
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка напоминаний"
+        )
+
+        await notify_admin(
+            "Ошибка отправки напоминаний"
+        )
+
+
+# =========================================================
+#             ПРОВЕРКА ДОСТУПА К КАНАЛУ
+# =========================================================
+
+
+async def periodic_channel_check():
+
+    try:
+
+        status = await check_channel_access()
+
+
+        if not status:
+
+            await notify_admin(
+                "Бот потерял доступ к каналу.\n"
+                "Проверьте права администратора."
+            )
+
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка проверки канала"
+        )
+
+
+# =========================================================
+#             ОБЩАЯ САМОДИАГНОСТИКА
+# =========================================================
+
+
+async def system_diagnostics():
+
+    while True:
+
+        try:
+
+            logger.info(
+                "SYSTEM STATUS | "
+                f"UPTIME: {human_time(int((now() - START_TIME).total_seconds()))}"
+            )
+
+
+            # Проверяем базу
+            await database_health()
+
+
+            # Проверяем канал
+            await periodic_channel_check()
 
 
         except Exception:
 
-            logger.warning(
-                f"Не удалось отправить "
-                f"напоминание пользователю {user_id}"
+            logger.exception(
+                "Ошибка диагностики"
             )
 
 
-# ==================================================
-# ВСПОМОГАТЕЛЬНАЯ КОМАНДА
-# Проверка доступа пользователя к каналу
-# ==================================================
+        # Раз в 30 минут
+        await asyncio.sleep(
+            1800
+        )
 
 
-@dp.message(Command("channel"))
-async def check_channel_access(
-    message: types.Message
-):
+# =========================================================
+#             ЗАЩИЩЕННЫЕ ЗАДАЧИ SCHEDULER
+# =========================================================
+
+
+async def safe_job(job, name):
 
     try:
 
-        chat = await bot.get_chat(
-            CHANNEL_ID
-        )
-
-
-        await message.answer(
-            "✅ Канал доступен боту\n\n"
-            f"Название: {chat.title}\n"
-            f"ID: {chat.id}"
-        )
-
-
-    except Exception as e:
-
-        await message.answer(
-            "❌ Ошибка доступа к каналу:\n\n"
-            f"{e}"
-        )
-
-# ==================================================
-# АДМИН ПАНЕЛЬ
-# ==================================================
-
-
-@dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
-
-    if not await admin_only(message):
-        return
-
-    await message.answer(
-        "👑 Панель администратора\n\n"
-        "/stats — статистика\n"
-        "/balance — баланс Stars\n"
-        "/check ID — проверить подписку\n"
-        "/add ID дни — выдать подписку\n"
-        "/extend ID дни — продлить подписку\n"
-        "/remove ID — удалить подписку"
-    )
-
-
-# ==================================================
-# СТАТИСТИКА
-# ==================================================
-
-
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-
-    if not await admin_only(message):
-        return
-
-
-    data = await get_stats()
-
-
-    await message.answer(
-        "📊 Статистика бота\n\n"
-        f"👥 Всего пользователей: {data['users']}\n"
-        f"✅ Активных подписок: {data['active']}\n"
-        f"💳 Всего оплат: {data['payments']}"
-    )
-
-
-# ==================================================
-# БАЛАНС TELEGRAM STARS
-# ==================================================
-
-
-@dp.message(Command("balance"))
-async def cmd_balance(message: types.Message):
-
-    if not await admin_only(message):
-        return
-
-
-    try:
-
-        balance = await bot.get_my_star_balance()
-
-
-        await message.answer(
-            "⭐ Баланс Telegram Stars\n\n"
-            f"Доступно Stars: {balance.amount}"
-        )
+        await job()
 
 
     except Exception:
 
         logger.exception(
-            "Ошибка получения баланса Stars"
+            f"Ошибка задачи {name}"
+        )
+
+        await notify_admin(
+            f"Задача {name} завершилась с ошибкой"
         )
 
 
-        await message.answer(
-            "❌ Не удалось получить баланс Stars."
+def register_scheduler_jobs():
+
+    scheduler.add_job(
+        lambda: asyncio.create_task(
+            safe_job(
+                check_expired_subscriptions,
+                "check_expired_subscriptions"
+            )
+        ),
+        "interval",
+        hours=1
+    )
+
+
+    scheduler.add_job(
+        lambda: asyncio.create_task(
+            safe_job(
+                send_reminders,
+                "send_reminders"
+            )
+        ),
+        CronTrigger(
+            hour=10,
+            minute=0
+        )
+    )
+
+
+    logger.info(
+        "Задачи планировщика зарегистрированы"
+    )
+
+# =========================================================
+#                     ЗАПУСК СИСТЕМЫ
+# =========================================================
+
+
+async def startup_checks():
+
+    logger.info(
+        "Запуск стартовых проверок..."
+    )
+
+
+    # Проверяем доступ к каналу
+    channel_ok = await check_channel_access()
+
+
+    if not channel_ok:
+
+        await notify_admin(
+            "Бот запущен, но не имеет доступа к каналу."
         )
 
 
-# ==================================================
-# ПРОВЕРКА ПОДПИСКИ
-# ==================================================
+    # Проверяем базу
+    db_ok = await database_health()
 
 
-@dp.message(Command("check"))
-async def cmd_check(
-    message: types.Message,
-    command: CommandObject
-):
+    if not db_ok:
 
-    if not await admin_only(message):
-        return
-
-
-    if not command.args:
-
-        await message.answer(
-            "Использование:\n/check ID"
+        raise RuntimeError(
+            "База данных недоступна"
         )
 
-        return
+
+    logger.info(
+        "Стартовые проверки завершены"
+    )
 
 
+# =========================================================
+#                     ОСТАНОВКА
+# =========================================================
+
+
+async def shutdown():
+
+    logger.info(
+        "Начинается завершение работы..."
+    )
+
+
+    # Останавливаем планировщик
     try:
 
-        user_id = int(command.args)
-
-
-    except ValueError:
-
-        await message.answer(
-            "ID должен быть числом."
-        )
-
-        return
-
-
-    data = await get_subscription(user_id)
-
-
-    if not data:
-
-        await message.answer(
-            "Пользователь не найден."
-        )
-
-        return
-
-
-    await message.answer(
-        "Информация о пользователе:\n\n"
-        f"ID: {user_id}\n"
-        f"Активна: {'Да' if data['is_active'] else 'Нет'}\n"
-        f"До: {data['subscription_end_date']}"
-    )
-
-
-# ==================================================
-# ДОБАВЛЕНИЕ ПОДПИСКИ
-# ==================================================
-
-
-@dp.message(Command("add"))
-async def cmd_add(
-    message: types.Message,
-    command: CommandObject
-):
-
-    if not await admin_only(message):
-        return
-
-
-    try:
-
-        user_id, days = map(
-            int,
-            command.args.split()
-        )
-
-
-    except Exception:
-
-        await message.answer(
-            "Использование:\n/add ID дни"
-        )
-
-        return
-
-
-    end_date = (
-        datetime.now().astimezone()
-        + timedelta(days=days)
-    )
-
-
-    await set_subscription(
-        user_id,
-        end_date
-    )
-
-
-    await message.answer(
-        f"✅ Подписка выдана до "
-        f"{end_date.strftime('%d.%m.%Y')}"
-    )
-
-
-# ==================================================
-# ПРОДЛЕНИЕ ПОДПИСКИ
-# ==================================================
-
-
-@dp.message(Command("extend"))
-async def cmd_extend(
-    message: types.Message,
-    command: CommandObject
-):
-
-    if not await admin_only(message):
-        return
-
-
-    try:
-
-        user_id, days = map(
-            int,
-            command.args.split()
-        )
-
-
-    except Exception:
-
-        await message.answer(
-            "Использование:\n/extend ID дни"
-        )
-
-        return
-
-
-    current = await get_subscription(user_id)
-
-
-    now = datetime.now().astimezone()
-
-
-    if (
-        current
-        and current["is_active"]
-        and current["subscription_end_date"] > now
-    ):
-
-        new_date = (
-            current["subscription_end_date"]
-            + timedelta(days=days)
-        )
-
-
-    else:
-
-        new_date = (
-            now
-            + timedelta(days=days)
-        )
-
-
-    await set_subscription(
-        user_id,
-        new_date
-    )
-
-
-    await message.answer(
-        f"✅ Подписка продлена до "
-        f"{new_date.strftime('%d.%m.%Y')}"
-    )
-
-
-# ==================================================
-# УДАЛЕНИЕ ПОДПИСКИ
-# ==================================================
-
-
-@dp.message(Command("remove"))
-async def cmd_remove(
-    message: types.Message,
-    command: CommandObject
-):
-
-    if not await admin_only(message):
-        return
-
-
-    if not command.args:
-
-        await message.answer(
-            "Использование:\n/remove ID"
-        )
-
-        return
-
-
-    try:
-
-        user_id = int(command.args)
-
-
-    except ValueError:
-
-        await message.answer(
-            "ID должен быть числом."
-        )
-
-        return
-
-
-    await kick_from_channel(
-        user_id
-    )
-
-
-    await delete_subscription(
-        user_id
-    )
-
-
-    await message.answer(
-        f"✅ Пользователь {user_id} удалён."
-    )
-
-# ==================================================
-# АДМИН ПАНЕЛЬ
-# ==================================================
-
-
-@dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
-
-    if not await admin_only(message):
-        return
-
-    await message.answer(
-        "👑 Панель администратора\n\n"
-        "/stats — статистика\n"
-        "/balance — баланс Stars\n"
-        "/check ID — проверить подписку\n"
-        "/add ID дни — выдать подписку\n"
-        "/extend ID дни — продлить подписку\n"
-        "/remove ID — удалить подписку"
-    )
-
-
-# ==================================================
-# СТАТИСТИКА
-# ==================================================
-
-
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-
-    if not await admin_only(message):
-        return
-
-
-    data = await get_stats()
-
-
-    await message.answer(
-        "📊 Статистика бота\n\n"
-        f"👥 Всего пользователей: {data['users']}\n"
-        f"✅ Активных подписок: {data['active']}\n"
-        f"💳 Всего оплат: {data['payments']}"
-    )
-
-
-# ==================================================
-# БАЛАНС TELEGRAM STARS
-# ==================================================
-
-
-@dp.message(Command("balance"))
-async def cmd_balance(message: types.Message):
-
-    if not await admin_only(message):
-        return
-
-
-    try:
-
-        balance = await bot.get_my_star_balance()
-
-
-        await message.answer(
-            "⭐ Баланс Telegram Stars\n\n"
-            f"Доступно Stars: {balance.amount}"
-        )
-
+        if scheduler.running:
+
+            scheduler.shutdown(
+                wait=False
+            )
+
+            logger.info(
+                "Scheduler остановлен"
+            )
 
     except Exception:
 
         logger.exception(
-            "Ошибка получения баланса Stars"
+            "Ошибка остановки scheduler"
         )
 
 
-        await message.answer(
-            "❌ Не удалось получить баланс Stars."
-        )
-
-
-# ==================================================
-# ПРОВЕРКА ПОДПИСКИ
-# ==================================================
-
-
-@dp.message(Command("check"))
-async def cmd_check(
-    message: types.Message,
-    command: CommandObject
-):
-
-    if not await admin_only(message):
-        return
-
-
-    if not command.args:
-
-        await message.answer(
-            "Использование:\n/check ID"
-        )
-
-        return
-
-
+    # Закрываем PostgreSQL pool
     try:
 
-        user_id = int(command.args)
+        global db_pool
 
+        if db_pool:
 
-    except ValueError:
+            await db_pool.close()
 
-        await message.answer(
-            "ID должен быть числом."
-        )
-
-        return
-
-
-    data = await get_subscription(user_id)
-
-
-    if not data:
-
-        await message.answer(
-            "Пользователь не найден."
-        )
-
-        return
-
-
-    await message.answer(
-        "Информация о пользователе:\n\n"
-        f"ID: {user_id}\n"
-        f"Активна: {'Да' if data['is_active'] else 'Нет'}\n"
-        f"До: {data['subscription_end_date']}"
-    )
-
-
-# ==================================================
-# ДОБАВЛЕНИЕ ПОДПИСКИ
-# ==================================================
-
-
-@dp.message(Command("add"))
-async def cmd_add(
-    message: types.Message,
-    command: CommandObject
-):
-
-    if not await admin_only(message):
-        return
-
-
-    try:
-
-        user_id, days = map(
-            int,
-            command.args.split()
-        )
-
+            logger.info(
+                "PostgreSQL pool закрыт"
+            )
 
     except Exception:
 
-        await message.answer(
-            "Использование:\n/add ID дни"
+        logger.exception(
+            "Ошибка закрытия базы"
         )
 
-        return
 
-
-    end_date = (
-        datetime.now().astimezone()
-        + timedelta(days=days)
-    )
-
-
-    await set_subscription(
-        user_id,
-        end_date
-    )
-
-
-    await message.answer(
-        f"✅ Подписка выдана до "
-        f"{end_date.strftime('%d.%m.%Y')}"
-    )
-
-
-# ==================================================
-# ПРОДЛЕНИЕ ПОДПИСКИ
-# ==================================================
-
-
-@dp.message(Command("extend"))
-async def cmd_extend(
-    message: types.Message,
-    command: CommandObject
-):
-
-    if not await admin_only(message):
-        return
-
-
+    # Закрываем сессию бота
     try:
 
-        user_id, days = map(
-            int,
-            command.args.split()
-        )
+        await bot.session.close()
 
+        logger.info(
+            "Telegram session закрыта"
+        )
 
     except Exception:
 
-        await message.answer(
-            "Использование:\n/extend ID дни"
-        )
-
-        return
-
-
-    current = await get_subscription(user_id)
-
-
-    now = datetime.now().astimezone()
-
-
-    if (
-        current
-        and current["is_active"]
-        and current["subscription_end_date"] > now
-    ):
-
-        new_date = (
-            current["subscription_end_date"]
-            + timedelta(days=days)
+        logger.exception(
+            "Ошибка закрытия Telegram"
         )
 
 
-    else:
-
-        new_date = (
-            now
-            + timedelta(days=days)
-        )
+# =========================================================
+#                       MAIN
+# =========================================================
 
 
-    await set_subscription(
-        user_id,
-        new_date
+async def main():
+
+    logger.info(
+        "Запуск Telegram Subscription Bot V2 PRO"
     )
 
 
-    await message.answer(
-        f"✅ Подписка продлена до "
-        f"{new_date.strftime('%d.%m.%Y')}"
+    # Подключаем PostgreSQL
+    await init_database()
+
+
+    # Запускаем HTTP сервер Render
+    http_thread = threading.Thread(
+        target=run_http_server,
+        daemon=True
+    )
+
+    http_thread.start()
+
+
+    # Удаляем старый webhook
+    try:
+
+        await bot.delete_webhook(
+            drop_pending_updates=True
+        )
+
+        logger.info(
+            "Webhook очищен"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка очистки webhook"
+        )
+
+
+    # Проверяем систему
+    await startup_checks()
+
+
+    # Запускаем задачи планировщика
+    register_scheduler_jobs()
+
+    scheduler.start()
+
+    logger.info(
+        "Scheduler запущен"
     )
 
 
-# ==================================================
-# УДАЛЕНИЕ ПОДПИСКИ
-# ==================================================
+    # Фоновый мониторинг
+    asyncio.create_task(
+        system_diagnostics()
+    )
 
 
-@dp.message(Command("remove"))
-async def cmd_remove(
-    message: types.Message,
-    command: CommandObject
-):
-
-    if not await admin_only(message):
-        return
+    asyncio.create_task(
+        monitor_system()
+    )
 
 
-    if not command.args:
+    logger.info(
+        "Бот готов к работе"
+    )
 
-        await message.answer(
-            "Использование:\n/remove ID"
+
+    # Запуск polling
+    try:
+
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types()
         )
 
-        return
 
+    finally:
+
+        await shutdown()
+
+
+# =========================================================
+#                     ТОЧКА ВХОДА
+# =========================================================
+
+
+if __name__ == "__main__":
 
     try:
 
-        user_id = int(command.args)
-
-
-    except ValueError:
-
-        await message.answer(
-            "ID должен быть числом."
+        asyncio.run(
+            main()
         )
 
-        return
+    except KeyboardInterrupt:
 
+        logger.info(
+            "Бот остановлен вручную"
+        )
 
-    await kick_from_channel(
-        user_id
-    )
+    except Exception:
 
-
-    await delete_subscription(
-        user_id
-    )
-
-
-    await message.answer(
-        f"✅ Пользователь {user_id} удалён."
-    )
+        logger.exception(
+            "Критическая ошибка запуска"
+        )
+        
