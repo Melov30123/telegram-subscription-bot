@@ -1164,51 +1164,52 @@ async def successful_payment(
 #            СОЗДАНИЕ ССЫЛКИ НА КАНАЛ
 # =========================================================
 
-try:
+    # =========================================================
+    #            СОЗДАНИЕ ССЫЛКИ НА КАНАЛ
+    # =========================================================
 
-    invite = await bot.create_chat_invite_link(
-        chat_id=CHANNEL_ID,
-        name=f"user_{user_id}",
-        expire_date=new_end,
-        member_limit=1
-    )
+    try:
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📢 Entrar al canal",
-                    url=invite.invite_link
-                )
+        invite = await bot.create_chat_invite_link(
+            chat_id=CHANNEL_ID,
+            name=f"user_{user_id}",
+            expire_date=new_end,
+            member_limit=1
+        )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📢 Entrar al canal",
+                        url=invite.invite_link
+                    )
+                ]
             ]
-        ]
-    )
+        )
 
-    await message.answer(
-        "✅ ¡Pago realizado con éxito!\n\n"
-        f"📅 Acceso activo hasta:\n"
-        f"{format_date(new_end)}\n\n"
-        "Pulsa el botón para entrar al canal:",
-        reply_markup=keyboard
-    )
+        await message.answer(
+            "✅ ¡Pago realizado con éxito!\n\n"
+            f"📅 Acceso activo hasta:\n"
+            f"{format_date(new_end)}\n\n"
+            "Pulsa el botón para entrar al canal:",
+            reply_markup=keyboard
+        )
 
-    logger.info(
-        f"Выдана ссылка пользователю {user_id}"
-    )
+        logger.info(
+            f"Выдана ссылка пользователю {user_id}"
+        )
 
-except TelegramBadRequest:
+    except TelegramBadRequest:
 
         logger.exception(
             "Ошибка создания ссылки"
         )
 
-
         await message.answer(
-            "❌ Оплата получена, но ссылка "
-            "не была создана.\n\n"
+            "❌ Оплата получена, но ссылка не была создана.\n\n"
             "Сообщите администратору."
         )
-
 
     except Exception:
 
@@ -1216,11 +1217,9 @@ except TelegramBadRequest:
             "Неизвестная ошибка выдачи ссылки"
         )
 
-
         await message.answer(
             "❌ Внутренняя ошибка сервера."
         )
-
 
 # =========================================================
 #                 ПРОВЕРКА ПОДПИСКИ
