@@ -948,14 +948,14 @@ async def cmd_start(
         ]
     )
 
-await message.answer(
-    "👋 ¡Bienvenido!\n\n"
-    "Este bot proporciona acceso a un canal privado.\n\n"
-    f"⭐ Precio: {PRICE_STARS} Stars\n"
-    f"📅 Duración: {SUBSCRIPTION_DAYS} días\n\n"
-    "Después del pago recibirás un enlace personal para acceder al canal.",
-    reply_markup=keyboard
-)
+    await message.answer(
+        "👋 ¡Bienvenido!\n\n"
+        "Este bot proporciona acceso a un canal privado.\n\n"
+        f"⭐ Precio: {PRICE_STARS} Stars\n"
+        f"📅 Duración: {SUBSCRIPTION_DAYS} días\n\n"
+        "Después del pago recibirás un enlace personal para acceder al canal.",
+        reply_markup=keyboard
+    )
 
 
 # =========================================================
@@ -1164,27 +1164,25 @@ async def successful_payment(
 #            СОЗДАНИЕ ССЫЛКИ НА КАНАЛ
 # =========================================================
 
-    try:
+try:
 
-        invite = await bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            name=f"user_{user_id}",
-            expire_date=new_end,
-            member_limit=1
-        )
+    invite = await bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        name=f"user_{user_id}",
+        expire_date=new_end,
+        member_limit=1
+    )
 
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📢 Entrar al canal",
-                        url=invite.invite_link
-                    )
-                ]
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📢 Entrar al canal",
+                    url=invite.invite_link
+                )
             ]
-        )
-
+        ]
+    )
 
     await message.answer(
         "✅ ¡Pago realizado con éxito!\n\n"
@@ -1194,13 +1192,11 @@ async def successful_payment(
         reply_markup=keyboard
     )
 
+    logger.info(
+        f"Выдана ссылка пользователю {user_id}"
+    )
 
-        logger.info(
-            f"Выдана ссылка пользователю {user_id}"
-        )
-
-
-    except TelegramBadRequest as e:
+except TelegramBadRequest:
 
         logger.exception(
             "Ошибка создания ссылки"
@@ -1249,8 +1245,8 @@ async def my_subscription(
     ):
 
         await message.answer(
-            "❌ No tienes una suscripción activa.\n\nUsa /start para comprar una."
-            "Используйте /start для покупки."
+            "❌ No tienes una suscripción activa.\n\n"
+            "Usa /start para comprar una."
         )
 
         return
