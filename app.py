@@ -602,7 +602,9 @@ async def get_all_users():
         )
 
 
-async def get_revenue_last_days(days: int):
+async def get_revenue_last_days(
+    days: int
+):
 
     async with db_pool.acquire() as conn:
 
@@ -612,7 +614,7 @@ async def get_revenue_last_days(days: int):
                 SUM(amount),
                 0
             )
-            FROM successful_payments
+            FROM payments
             WHERE created_at >= NOW() - ($1 * INTERVAL '1 day')
             """,
             days
@@ -939,23 +941,21 @@ async def cmd_start(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="⭐ Купить подписку",
+                    text="⭐ Comprar suscripción",
                     callback_data="buy_subscription"
                 )
             ]
         ]
     )
 
-
-    await message.answer(
-        "👋 Добро пожаловать!\n\n"
-        "Это бот для доступа в закрытый канал.\n\n"
-        f"⭐ Стоимость: {PRICE_STARS} Stars\n"
-        f"📅 Срок: {SUBSCRIPTION_DAYS} дней\n\n"
-        "После оплаты вы получите персональную ссылку "
-        "для вступления в канал.",
-        reply_markup=keyboard
-    )
+await message.answer(
+    "👋 ¡Bienvenido!\n\n"
+    "Este bot proporciona acceso a un canal privado.\n\n"
+    f"⭐ Precio: {PRICE_STARS} Stars\n"
+    f"📅 Duración: {SUBSCRIPTION_DAYS} días\n\n"
+    "Después del pago recibirás un enlace personal para acceder al canal.",
+    reply_markup=keyboard
+)
 
 
 # =========================================================
@@ -1178,7 +1178,7 @@ async def successful_payment(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="📢 Войти в канал",
+                        text="📢 Entrar al canal",
                         url=invite.invite_link
                     )
                 ]
@@ -1186,14 +1186,13 @@ async def successful_payment(
         )
 
 
-        await message.answer(
-            "✅ Оплата прошла успешно!\n\n"
-            f"📅 Доступ активен до:\n"
-            f"{format_date(new_end)}\n\n"
-            "Нажмите кнопку ниже, "
-            "чтобы вступить в канал:",
-            reply_markup=keyboard
-        )
+    await message.answer(
+        "✅ ¡Pago realizado con éxito!\n\n"
+        f"📅 Acceso activo hasta:\n"
+        f"{format_date(new_end)}\n\n"
+        "Pulsa el botón para entrar al canal:",
+        reply_markup=keyboard
+    )
 
 
         logger.info(
@@ -1250,7 +1249,7 @@ async def my_subscription(
     ):
 
         await message.answer(
-            "❌ У вас нет активной подписки.\n\n"
+            "❌ No tienes una suscripción activa.\n\nUsa /start para comprar una."
             "Используйте /start для покупки."
         )
 
@@ -1264,9 +1263,9 @@ async def my_subscription(
 
 
     await message.answer(
-        "✅ Ваша подписка активна\n\n"
-        f"📅 До: {format_date(user['subscription_end_date'])}\n"
-        f"⏳ Осталось дней: {left}"
+        "✅ Tu suscripción está activa\n\n"
+        f"📅 Válida hasta: {format_date(user['subscription_end_date'])}\n"
+        f"⏳ Días restantes: {left}"
     )
 
 
