@@ -218,6 +218,21 @@ async def init_database():
             """
         )
 
+                await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS subscription_end TIMESTAMPTZ
+        """)
+
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE
+        """)
+
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()
+        """)
+
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS payments(
