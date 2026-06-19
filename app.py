@@ -218,7 +218,7 @@ async def init_database():
             """
         )
 
-                await conn.execute("""
+        await conn.execute("""
             ALTER TABLE users
             ADD COLUMN IF NOT EXISTS subscription_end TIMESTAMPTZ
         """)
