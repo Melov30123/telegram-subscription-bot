@@ -19,7 +19,7 @@ class UserTrackingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        user = event.from_user if isinstance(event, (Message, CallbackQuery)) else None
+        user = event.from_user if isinstance(event, Message | CallbackQuery) else None
         database: Database | None = data.get("database")
         if user is not None and database is not None and not user.is_bot:
             try:
