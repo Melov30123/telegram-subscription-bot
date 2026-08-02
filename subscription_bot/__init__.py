@@ -1,0 +1,3 @@
+"""Telegram subscription bot package."""
+
+__version__ = "4.0.0"
