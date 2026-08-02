@@ -1,0 +1,30 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: ${BOT_ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: postgresql://subscription_bot:${POSTGRES_PASSWORD:-change_me}@postgres:5432/subscription_bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PORT:-8080}:8080"
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: subscription_bot
+      POSTGRES_USER: subscription_bot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U subscription_bot -d subscription_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
