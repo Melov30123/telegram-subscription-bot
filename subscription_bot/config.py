@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     @field_validator("timezone")
     @classmethod
     def validate_timezone(cls, value: str) -> str:
+        aliases = {
+            "moscow": "Europe/Moscow",
+            "msk": "Europe/Moscow",
+        }
+        value = aliases.get(value.strip().casefold(), value.strip())
         ZoneInfo(value)
         return value
 
