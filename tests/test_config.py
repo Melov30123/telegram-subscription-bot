@@ -16,10 +16,11 @@ def make_settings(**overrides) -> Settings:
 
 
 def test_settings_normalize_database_and_admins() -> None:
-    settings = make_settings()
+    settings = make_settings(timezone="Moscow")
     assert settings.database_url.startswith("postgresql://")
     assert settings.admin_ids == [10, 20]
     assert settings.admin_id_set == {10, 20}
+    assert settings.timezone == "Europe/Moscow"
 
 
 def test_settings_reject_invalid_pool() -> None:
