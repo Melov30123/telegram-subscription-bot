@@ -9,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _parse_admin_ids(value: object) -> list[int] | object:
+    if isinstance(value, int):
+        return [value]
     if isinstance(value, str):
         return [int(item.strip()) for item in value.split(",") if item.strip()]
     return value
