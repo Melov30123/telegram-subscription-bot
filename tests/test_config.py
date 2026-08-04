@@ -23,6 +23,11 @@ def test_settings_normalize_database_and_admins() -> None:
     assert settings.timezone == "Europe/Moscow"
 
 
+def test_settings_accept_single_numeric_admin_id() -> None:
+    settings = make_settings(admin_ids=1477505537)
+    assert settings.admin_ids == [1477505537]
+
+
 def test_settings_reject_invalid_pool() -> None:
     with pytest.raises(ValidationError):
         make_settings(database_pool_min_size=10, database_pool_max_size=2)
