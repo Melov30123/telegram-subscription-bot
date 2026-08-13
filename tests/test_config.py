@@ -43,6 +43,17 @@ def test_guide_is_disabled_without_url() -> None:
     assert make_settings(guide_download_url="").guide_enabled is False
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("//drive.google.com/file/d/example/view", "https://drive.google.com/file/d/example/view"),
+        ("drive.google.com/file/d/example/view", "https://drive.google.com/file/d/example/view"),
+    ],
+)
+def test_guide_url_adds_missing_https(value: str, expected: str) -> None:
+    assert make_settings(guide_download_url=value).guide_download_url == expected
+
+
 def test_settings_reject_invalid_pool() -> None:
     with pytest.raises(ValidationError):
         make_settings(database_pool_min_size=10, database_pool_max_size=2)
