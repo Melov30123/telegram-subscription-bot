@@ -28,6 +28,21 @@ def test_settings_accept_single_numeric_admin_id() -> None:
     assert settings.admin_ids == [1477505537]
 
 
+def test_guide_settings_and_trailing_comma() -> None:
+    settings = make_settings(
+        guide_download_url="https://drive.google.com/file/d/example/view,",
+        guide_price_stars=250,
+        guide_title="My guide",
+    )
+    assert settings.guide_enabled is True
+    assert settings.guide_download_url == "https://drive.google.com/file/d/example/view"
+    assert settings.guide_price_stars == 250
+
+
+def test_guide_is_disabled_without_url() -> None:
+    assert make_settings(guide_download_url="").guide_enabled is False
+
+
 def test_settings_reject_invalid_pool() -> None:
     with pytest.raises(ValidationError):
         make_settings(database_pool_min_size=10, database_pool_max_size=2)

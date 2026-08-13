@@ -31,6 +31,8 @@ def settings_for(database_name: str) -> Settings:
         default_plan_duration_days=30,
         database_pool_min_size=1,
         database_pool_max_size=3,
+        guide_download_url="https://drive.google.com/file/d/test/view",
+        guide_price_stars=250,
     )
 
 
@@ -82,12 +84,40 @@ async def fresh_database_scenario() -> None:
         )
         assert duplicate.already_processed is True
         assert duplicate.payment_id == result.payment_id
+
+        guide_intent = await database.create_guide_payment_intent(42)
+        assert await database.validate_guide_payment_intent(
+            guide_intent["id"], 42, 250, "XTR"
+        )
+        guide_result = await database.complete_guide_payment(
+            intent_id=uuid.UUID(str(guide_intent["id"])),
+            user_id=42,
+            telegram_charge_id="guide-charge-1",
+            provider_charge_id="",
+            amount=250,
+            currency="XTR",
+            raw_data={"test": True},
+        )
+        guide_duplicate = await database.complete_guide_payment(
+            intent_id=uuid.UUID(str(guide_intent["id"])),
+            user_id=42,
+            telegram_charge_id="guide-charge-1",
+            provider_charge_id="",
+            amount=250,
+            currency="XTR",
+            raw_data={"test": True},
+        )
+        assert guide_duplicate.already_processed is True
+        assert guide_duplicate.purchase_id == guide_result.purchase_id
+        assert await database.has_guide_purchase(42)
         assert (await database.get_user(42))["has_access"] is True
         stats = await database.get_stats()
         assert stats.users == 1
         assert stats.active == 1
-        assert stats.payments == 1
-        assert stats.stars_total == 100
+        assert stats.payments == 2
+        assert stats.stars_total == 350
+        assert stats.guide_payments == 1
+        assert stats.guide_stars_total == 250
     finally:
         await database.close()
         await drop_database(FRESH_DATABASE)
