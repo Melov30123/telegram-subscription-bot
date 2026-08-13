@@ -72,6 +72,10 @@ class Settings(BaseSettings):
         if value is None or not value.strip():
             return None
         value = value.strip().rstrip(",")
+        if value.startswith("//"):
+            value = f"https:{value}"
+        elif value.startswith("drive.google.com/"):
+            value = f"https://{value}"
         if not value.startswith(("https://", "http://")):
             raise ValueError("GUIDE_DOWNLOAD_URL must be an HTTP(S) URL")
         return value
