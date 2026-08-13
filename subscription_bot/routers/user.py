@@ -6,7 +6,13 @@ from aiogram.types import CallbackQuery, Message
 
 from subscription_bot.config import Settings
 from subscription_bot.database import Database, utcnow
-from subscription_bot.keyboards import invite_keyboard, language_keyboard, plans_keyboard
+from subscription_bot.keyboards import (
+    guide_download_keyboard,
+    guide_keyboard,
+    invite_keyboard,
+    language_keyboard,
+    plans_keyboard,
+)
 from subscription_bot.locales import normalize_language, tr
 from subscription_bot.services import AccessService
 from subscription_bot.utils import days_remaining, format_datetime
@@ -17,11 +23,18 @@ router = Router(name="user")
 async def send_plans(message: Message, database: Database) -> None:
     language = await database.get_language(message.from_user.id)
     plans = await database.get_active_plans()
-    if not plans:
+    if not plans and not database.settings.guide_enabled:
         await message.answer(tr(language, "no_plans"))
         return
     await message.answer(
-        tr(language, "plans_title"), reply_markup=plans_keyboard(plans, language)
+        tr(language, "plans_title"),
+        reply_markup=plans_keyboard(
+            plans,
+            language,
+            database.settings.guide_price_stars
+            if database.settings.guide_enabled
+            else None,
+        ),
     )
 
 
@@ -52,6 +65,24 @@ async def start(message: Message, command: CommandObject, database: Database) ->
 @router.message(Command("plans"))
 async def plans(message: Message, database: Database) -> None:
     await send_plans(message, database)
+
+
+@router.message(Command("guide"))
+async def guide(message: Message, database: Database, settings: Settings) -> None:
+    language = await database.get_language(message.from_user.id)
+    if not settings.guide_enabled or settings.guide_download_url is None:
+        await message.answer(tr(language, "guide_unavailable"))
+        return
+    if await database.has_guide_purchase(message.from_user.id):
+        await message.answer(
+            tr(language, "guide_already_bought"),
+            reply_markup=guide_download_keyboard(settings.guide_download_url, language),
+        )
+        return
+    await message.answer(
+        tr(language, "guide_offer", price=settings.guide_price_stars),
+        reply_markup=guide_keyboard(settings.guide_price_stars, language),
+    )
 
 
 @router.message(Command("my"))

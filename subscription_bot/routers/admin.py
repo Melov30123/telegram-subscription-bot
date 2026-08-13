@@ -49,8 +49,9 @@ ADMIN_HELP = """<b>Все команды администратора</b>
 /export — CSV со всеми пользователями
 
 <b>Оплата и тарифы</b>
+/guide — купить или повторно получить ссылку на гайд
 /payments [КОЛИЧЕСТВО] — последние платежи
-/refund TELEGRAM_CHARGE_ID — возврат Stars и сокращение доступа
+/refund TELEGRAM_CHARGE_ID — возврат Stars; для подписки также сокращает доступ
 /plans_admin — список всех тарифов
 /plan_add CODE STARS ДНИ НАЗВАНИЕ — создать тариф
 /plan_toggle CODE — включить/выключить тариф
@@ -98,6 +99,7 @@ def user_card(user: asyncpg.Record, timezone: str) -> str:
         f"Подписка: {status}\n"
         f"Доступ до: {format_datetime(user['access_until'], timezone)}\n"
         f"Платежей: {user['payment_count']} · Stars: {user['stars_paid']}\n"
+        f"Покупок гайда: {user['guide_purchase_count']}\n"
         f"Покупки запрещены: {'да' if user['is_blocked'] else 'нет'}\n"
         f"Заблокировал бота: {'да' if user['bot_blocked'] else 'нет'}\n"
         f"Создан: {format_datetime(user['created_at'], timezone)}\n"
@@ -148,7 +150,9 @@ def create_admin_router(settings: Settings) -> Router:
             f"Заблокировали бота: <b>{stats.blocked_bot}</b>\n\n"
             f"Успешных платежей: <b>{stats.payments}</b>\n"
             f"Получено Stars: <b>{stats.stars_total}</b>\n"
-            f"Stars за 30 дней: <b>{stats.stars_30d}</b>"
+            f"Stars за 30 дней: <b>{stats.stars_30d}</b>\n\n"
+            f"Продано гайдов: <b>{stats.guide_payments}</b>\n"
+            f"Stars за гайды: <b>{stats.guide_stars_total}</b>"
         )
 
     @router.message(Command("stats"))
@@ -309,7 +313,7 @@ def create_admin_router(settings: Settings) -> Router:
             icon = "✅" if payment["status"] == "paid" else "↩️"
             lines.append(
                 f"{icon} {payment['amount_stars']} ⭐ · <code>{payment['user_id']}</code>\n"
-                f"{safe(payment['plan_title'])} · "
+                f"{safe(payment['product_title'])} · "
                 f"{format_datetime(payment['created_at'], settings.timezone)}\n"
                 f"<code>{safe(payment['telegram_charge_id'])}</code>"
             )
@@ -342,7 +346,7 @@ def create_admin_router(settings: Settings) -> Router:
         if not charge_id:
             await message.answer("Использование: <code>/refund TELEGRAM_CHARGE_ID</code>")
             return
-        payment = await database.get_payment(charge_id)
+        payment = await database.get_any_payment(charge_id)
         if payment is None:
             await message.answer("Платёж не найден.")
             return
@@ -356,13 +360,17 @@ def create_admin_router(settings: Settings) -> Router:
         except TelegramBadRequest as exc:
             await message.answer(f"Telegram отклонил возврат: {safe(exc)}")
             return
-        new_until = await database.mark_payment_refunded(
-            message.from_user.id, charge_id
-        )
-        await message.answer(
-            "✅ Stars возвращены. Новый срок доступа: "
-            f"{format_datetime(new_until, settings.timezone)}."
-        )
+        if await database.get_guide_payment(charge_id) is not None:
+            await database.mark_guide_payment_refunded(message.from_user.id, charge_id)
+            await message.answer("✅ Stars за гайд возвращены; ссылка больше не выдаётся.")
+        else:
+            new_until = await database.mark_payment_refunded(
+                message.from_user.id, charge_id
+            )
+            await message.answer(
+                "✅ Stars возвращены. Новый срок доступа: "
+                f"{format_datetime(new_until, settings.timezone)}."
+            )
 
     async def plans_text(database: Database) -> str:
         rows = await database.get_plans()
@@ -652,7 +660,9 @@ def create_admin_router(settings: Settings) -> Router:
             f"Часовой пояс: {safe(settings.timezone)}\n"
             f"Язык по умолчанию: {settings.default_language}\n"
             f"Скорость рассылки: {settings.broadcast_rate_per_second}/с\n"
-            f"Поддержка: {safe(settings.support_username)}\n\n"
+            f"Поддержка: {safe(settings.support_username)}\n"
+            f"Гайд: {'✅ включён' if settings.guide_enabled else '❌ выключен'}\n"
+            f"Цена гайда: {settings.guide_price_stars} ⭐\n\n"
             "Токен и строка подключения намеренно не показываются."
         )
 
