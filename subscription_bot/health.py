@@ -52,5 +52,6 @@ class HealthServer:
                 "active_subscriptions": stats.active,
                 "successful_payments": stats.payments,
                 "stars_total": stats.stars_total,
+                "guide_purchases": stats.guide_payments,
             }
         )

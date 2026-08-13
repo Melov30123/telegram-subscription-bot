@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 USER_COMMANDS = [
     BotCommand(command="start", description="Открыть главное меню"),
     BotCommand(command="plans", description="Тарифы и покупка"),
+    BotCommand(command="guide", description="Купить или скачать гайд"),
     BotCommand(command="my", description="Моя подписка"),
     BotCommand(command="invite", description="Ссылка в канал"),
     BotCommand(command="promo", description="Активировать промокод"),

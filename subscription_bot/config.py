@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     default_plan_price_stars: int = Field(default=100, ge=1, le=10000)
     default_plan_duration_days: int = Field(default=30, ge=1, le=3650)
 
+    guide_download_url: str | None = None
+    guide_price_stars: int = Field(default=500, ge=1, le=10000)
+    guide_title: str = Field(default="Практический гайд", min_length=1, max_length=32)
+
     support_username: str = "@support"
     terms_url: str = "https://telegram.org/tos/bot-developers"
     default_language: Literal["ru", "en", "es"] = "ru"
@@ -62,6 +66,16 @@ class Settings(BaseSettings):
     def normalize_database_url(cls, value: str) -> str:
         return value.replace("postgres://", "postgresql://", 1)
 
+    @field_validator("guide_download_url")
+    @classmethod
+    def validate_guide_download_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip().rstrip(",")
+        if not value.startswith(("https://", "http://")):
+            raise ValueError("GUIDE_DOWNLOAD_URL must be an HTTP(S) URL")
+        return value
+
     @field_validator("timezone")
     @classmethod
     def validate_timezone(cls, value: str) -> str:
@@ -82,6 +96,10 @@ class Settings(BaseSettings):
     @property
     def admin_id_set(self) -> frozenset[int]:
         return frozenset(self.admin_ids)
+
+    @property
+    def guide_enabled(self) -> bool:
+        return self.guide_download_url is not None
 
 
 @lru_cache

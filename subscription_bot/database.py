@@ -11,7 +11,12 @@ from typing import Any
 import asyncpg
 
 from subscription_bot.config import Settings
-from subscription_bot.models import PaymentCompletion, PromoRedemption, Stats
+from subscription_bot.models import (
+    GuidePaymentCompletion,
+    PaymentCompletion,
+    PromoRedemption,
+    Stats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +157,11 @@ class Database:
                    (u.access_until IS NOT NULL AND u.access_until > NOW()) AS has_access,
                    (SELECT COUNT(*) FROM payments p WHERE p.user_id=u.telegram_id) AS payment_count,
                    (SELECT COALESCE(SUM(amount_stars), 0) FROM payments p
-                    WHERE p.user_id=u.telegram_id AND p.status='paid') AS stars_paid
+                    WHERE p.user_id=u.telegram_id AND p.status='paid') +
+                   (SELECT COALESCE(SUM(amount_stars), 0) FROM guide_purchases gp
+                    WHERE gp.user_id=u.telegram_id AND gp.status='paid') AS stars_paid,
+                   (SELECT COUNT(*) FROM guide_purchases gp
+                    WHERE gp.user_id=u.telegram_id AND gp.status='paid') AS guide_purchase_count
             FROM users u WHERE telegram_id=$1
             """,
             user_id,
@@ -392,6 +401,104 @@ class Database:
             )
             return PaymentCompletion(payment_id, ends_at)
 
+    async def create_guide_payment_intent(self, user_id: int) -> asyncpg.Record:
+        return await self._pool().fetchrow(
+            """
+            INSERT INTO guide_payment_intents(id, user_id, amount_stars, expires_at)
+            VALUES($1, $2, $3, NOW() + INTERVAL '30 minutes') RETURNING *
+            """,
+            uuid.uuid4(),
+            user_id,
+            self.settings.guide_price_stars,
+        )
+
+    async def validate_guide_payment_intent(
+        self, intent_id: uuid.UUID, user_id: int, amount: int, currency: str
+    ) -> bool:
+        return bool(
+            await self._pool().fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM guide_payment_intents i
+                    JOIN users u ON u.telegram_id=i.user_id
+                    WHERE i.id=$1 AND i.user_id=$2 AND i.amount_stars=$3
+                      AND $4='XTR' AND i.status='pending' AND i.expires_at>NOW()
+                      AND NOT u.is_blocked
+                )
+                """,
+                intent_id,
+                user_id,
+                amount,
+                currency,
+            )
+        )
+
+    async def complete_guide_payment(
+        self,
+        *,
+        intent_id: uuid.UUID,
+        user_id: int,
+        telegram_charge_id: str,
+        provider_charge_id: str | None,
+        amount: int,
+        currency: str,
+        raw_data: dict[str, Any],
+    ) -> GuidePaymentCompletion:
+        async with self._pool().acquire() as conn, conn.transaction():
+            existing = await conn.fetchrow(
+                "SELECT id FROM guide_purchases WHERE telegram_charge_id=$1",
+                telegram_charge_id,
+            )
+            if existing:
+                return GuidePaymentCompletion(existing["id"], True)
+
+            intent = await conn.fetchrow(
+                "SELECT * FROM guide_payment_intents WHERE id=$1 FOR UPDATE", intent_id
+            )
+            if (
+                intent is None
+                or intent["user_id"] != user_id
+                or intent["amount_stars"] != amount
+                or currency != "XTR"
+                or intent["status"] != "pending"
+                or intent["expires_at"] <= utcnow()
+            ):
+                raise ValueError("Invalid or expired guide payment intent")
+
+            purchase_id = await conn.fetchval(
+                """
+                INSERT INTO guide_purchases(
+                    telegram_charge_id, provider_charge_id, intent_id, user_id,
+                    amount_stars, currency, raw_data
+                ) VALUES($1, $2, $3, $4, $5, $6, $7::JSONB)
+                RETURNING id
+                """,
+                telegram_charge_id,
+                provider_charge_id,
+                intent_id,
+                user_id,
+                amount,
+                currency,
+                json.dumps(raw_data, ensure_ascii=False),
+            )
+            await conn.execute(
+                "UPDATE guide_payment_intents SET status='paid', paid_at=NOW() WHERE id=$1",
+                intent_id,
+            )
+            return GuidePaymentCompletion(purchase_id)
+
+    async def has_guide_purchase(self, user_id: int) -> bool:
+        return bool(
+            await self._pool().fetchval(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM guide_purchases WHERE user_id=$1 AND status='paid'
+                )
+                """,
+                user_id,
+            )
+        )
+
     async def grant_subscription(
         self, admin_id: int, user_id: int, days: int, reason: str = "Manual grant"
     ) -> datetime:
@@ -469,15 +576,36 @@ class Database:
             charge_id,
         )
 
+    async def get_guide_payment(self, charge_id: str) -> asyncpg.Record | None:
+        return await self._pool().fetchrow(
+            "SELECT * FROM guide_purchases WHERE telegram_charge_id=$1", charge_id
+        )
+
+    async def get_any_payment(self, charge_id: str) -> asyncpg.Record | None:
+        payment = await self.get_payment(charge_id)
+        if payment is not None:
+            return payment
+        guide_payment = await self.get_guide_payment(charge_id)
+        if guide_payment is not None:
+            return guide_payment
+        return None
+
     async def list_payments(self, limit: int = 10) -> list[asyncpg.Record]:
         return await self._pool().fetch(
             """
-            SELECT p.*, pl.title AS plan_title, u.username
-            FROM payments p JOIN plans pl ON pl.id=p.plan_id
-            JOIN users u ON u.telegram_id=p.user_id
-            ORDER BY p.created_at DESC LIMIT $1
+            SELECT * FROM (
+                SELECT p.telegram_charge_id, p.user_id, p.amount_stars, p.status,
+                       p.created_at, pl.title AS product_title, 'subscription' AS product_type
+                FROM payments p JOIN plans pl ON pl.id=p.plan_id
+                UNION ALL
+                SELECT gp.telegram_charge_id, gp.user_id, gp.amount_stars, gp.status,
+                       gp.created_at, $2::TEXT AS product_title, 'guide' AS product_type
+                FROM guide_purchases gp
+            ) history
+            ORDER BY created_at DESC LIMIT $1
             """,
             limit,
+            self.settings.guide_title,
         )
 
     async def mark_payment_refunded(self, admin_id: int, charge_id: str) -> datetime | None:
@@ -528,6 +656,29 @@ class Database:
             )
             return new_until
 
+    async def mark_guide_payment_refunded(self, admin_id: int, charge_id: str) -> bool:
+        purchase = await self._pool().fetchrow(
+            "SELECT * FROM guide_purchases WHERE telegram_charge_id=$1", charge_id
+        )
+        if purchase is None or purchase["status"] != "paid":
+            return False
+        result = await self._pool().execute(
+            """
+            UPDATE guide_purchases SET status='refunded', refunded_at=NOW()
+            WHERE telegram_charge_id=$1 AND status='paid'
+            """,
+            charge_id,
+        )
+        changed = result.endswith("1")
+        if changed:
+            await self.audit(
+                admin_id,
+                "guide.refund",
+                purchase["user_id"],
+                {"charge_id": charge_id, "amount": purchase["amount_stars"]},
+            )
+        return changed
+
     async def create_invite(self, user_id: int, link: str, expires_at: datetime) -> None:
         await self._pool().execute(
             """
@@ -576,15 +727,27 @@ class Database:
             FROM payments
             """
         )
+        guide_revenue = await self._pool().fetchrow(
+            """
+            SELECT COUNT(*) FILTER (WHERE status='paid') AS payments,
+                   COALESCE(SUM(amount_stars) FILTER (WHERE status='paid'), 0) AS stars_total,
+                   COALESCE(SUM(amount_stars) FILTER (
+                       WHERE status='paid' AND created_at>=NOW()-INTERVAL '30 days'
+                   ), 0) AS stars_30d
+            FROM guide_purchases
+            """
+        )
         return Stats(
             users=row["users"],
             active=row["active"],
             expired=row["expired"],
             blocked_bot=row["blocked_bot"],
-            payments=revenue["payments"],
-            stars_total=revenue["stars_total"],
-            stars_30d=revenue["stars_30d"],
+            payments=revenue["payments"] + guide_revenue["payments"],
+            stars_total=revenue["stars_total"] + guide_revenue["stars_total"],
+            stars_30d=revenue["stars_30d"] + guide_revenue["stars_30d"],
             new_users_24h=row["new_users_24h"],
+            guide_payments=guide_revenue["payments"],
+            guide_stars_total=guide_revenue["stars_total"],
         )
 
     async def expired_users_pending_removal(self, limit: int = 500) -> list[int]:
@@ -836,6 +999,8 @@ class Database:
         await self._pool().execute(
             """
             UPDATE payment_intents SET status='expired'
+            WHERE status='pending' AND expires_at<=NOW();
+            UPDATE guide_payment_intents SET status='expired'
             WHERE status='pending' AND expires_at<=NOW();
             DELETE FROM reminder_deliveries WHERE delivered_at<NOW()-INTERVAL '1 year';
             """

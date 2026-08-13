@@ -37,8 +37,15 @@ def parse_int(value: str, *, minimum: int, maximum: int, name: str) -> int:
     return number
 
 
-def parse_payment_payload(payload: str) -> uuid.UUID:
+def parse_invoice_payload(payload: str) -> tuple[str, uuid.UUID]:
     prefix, value = payload.split(":", 1)
-    if prefix != "sub":
+    if prefix not in {"sub", "guide"}:
         raise ValueError("Unknown invoice payload")
-    return uuid.UUID(value)
+    return prefix, uuid.UUID(value)
+
+
+def parse_payment_payload(payload: str) -> uuid.UUID:
+    prefix, intent_id = parse_invoice_payload(payload)
+    if prefix != "sub":
+        raise ValueError("Not a subscription invoice")
+    return intent_id

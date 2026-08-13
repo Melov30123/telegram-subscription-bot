@@ -8,7 +8,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from subscription_bot.locales import tr
 
 
-def plans_keyboard(plans: Sequence[object], language: str) -> InlineKeyboardMarkup:
+def plans_keyboard(
+    plans: Sequence[object], language: str, guide_price: int | None = None
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for plan in plans:
         builder.button(
@@ -21,8 +23,34 @@ def plans_keyboard(plans: Sequence[object], language: str) -> InlineKeyboardMark
             ),
             callback_data=f"buy:{plan['id']}",
         )
+    if guide_price is not None:
+        builder.button(
+            text=tr(language, "guide_buy_button", price=guide_price),
+            callback_data="guide:buy",
+        )
     builder.adjust(1)
     return builder.as_markup()
+
+
+def guide_keyboard(price: int, language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=tr(language, "guide_buy_button", price=price),
+                    callback_data="guide:buy",
+                )
+            ]
+        ]
+    )
+
+
+def guide_download_keyboard(link: str, language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=tr(language, "guide_download_button"), url=link)]
+        ]
+    )
 
 
 def language_keyboard() -> InlineKeyboardMarkup:

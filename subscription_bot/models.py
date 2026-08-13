@@ -12,6 +12,12 @@ class PaymentCompletion:
 
 
 @dataclass(frozen=True, slots=True)
+class GuidePaymentCompletion:
+    purchase_id: int
+    already_processed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class PromoRedemption:
     ok: bool
     message: str
@@ -28,3 +34,5 @@ class Stats:
     stars_total: int
     stars_30d: int
     new_users_24h: int
+    guide_payments: int
+    guide_stars_total: int

@@ -14,6 +14,19 @@ MESSAGES: dict[str, dict[str, str]] = {
         "plans_title": "<b>Выберите тариф</b>\n\nОплата проходит безопасно внутри Telegram:",
         "no_plans": "Сейчас нет доступных тарифов. Попробуйте немного позже.",
         "buy_button": "⭐ {title} · {price} Stars · {days} дн.",
+        "guide_offer": (
+            "<b>📘 Купить гайд</b>\n\n"
+            "После оплаты бот сразу выдаст ссылку на скачивание с Google Drive.\n"
+            "Цена: <b>{price} ⭐</b>"
+        ),
+        "guide_buy_button": "📘 Купить гайд · {price} ⭐",
+        "guide_invoice_title": "{title}",
+        "guide_invoice_description": "Цифровой гайд со ссылкой на скачивание",
+        "guide_payment_ok": "✅ <b>Гайд оплачен</b>\n\nСсылка на скачивание доступна ниже.",
+        "guide_already_bought": "✅ Вы уже покупали гайд. Ссылка доступна ниже.",
+        "guide_download_button": "📥 Скачать гайд",
+        "guide_unavailable": "Сейчас покупка гайда временно недоступна.",
+        "guide_not_bought": "Вы ещё не покупали гайд. Оформить покупку можно ниже.",
         "invoice_title": "Подписка: {title}",
         "invoice_description": "Доступ к закрытому каналу на {days} дней",
         "payment_invalid": "Платёж устарел или его параметры изменились. Создайте новый счёт.",
@@ -37,6 +50,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help": (
             "<b>Команды</b>\n"
             "/plans — тарифы и покупка\n"
+            "/guide — купить или скачать гайд\n"
             "/my — состояние подписки\n"
             "/invite — новая ссылка в канал\n"
             "/promo CODE — применить промокод\n"
@@ -64,6 +78,19 @@ MESSAGES: dict[str, dict[str, str]] = {
         "plans_title": "<b>Choose a plan</b>\n\nPayment is processed securely by Telegram:",
         "no_plans": "No plans are available right now. Please try again later.",
         "buy_button": "⭐ {title} · {price} Stars · {days} days",
+        "guide_offer": (
+            "<b>📘 Buy the guide</b>\n\n"
+            "After payment, the bot will immediately provide the Google Drive download link.\n"
+            "Price: <b>{price} ⭐</b>"
+        ),
+        "guide_buy_button": "📘 Buy guide · {price} ⭐",
+        "guide_invoice_title": "{title}",
+        "guide_invoice_description": "Digital guide with a download link",
+        "guide_payment_ok": "✅ <b>Guide purchased</b>\n\nYour download link is below.",
+        "guide_already_bought": "✅ You already purchased the guide. Your link is below.",
+        "guide_download_button": "📥 Download guide",
+        "guide_unavailable": "Guide purchases are temporarily unavailable.",
+        "guide_not_bought": "You have not purchased the guide yet. Buy it below.",
         "invoice_title": "Subscription: {title}",
         "invoice_description": "Private channel access for {days} days",
         "payment_invalid": "This invoice is invalid or expired. Please create a new one.",
@@ -87,6 +114,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help": (
             "<b>Commands</b>\n"
             "/plans — plans and purchase\n"
+            "/guide — buy or download the guide\n"
             "/my — subscription status\n"
             "/invite — new channel invite\n"
             "/promo CODE — redeem a promo code\n"
@@ -114,6 +142,19 @@ MESSAGES: dict[str, dict[str, str]] = {
         "plans_title": "<b>Elige un plan</b>\n\nEl pago se procesa de forma segura en Telegram:",
         "no_plans": "No hay planes disponibles ahora. Inténtalo más tarde.",
         "buy_button": "⭐ {title} · {price} Stars · {days} días",
+        "guide_offer": (
+            "<b>📘 Comprar la guía</b>\n\n"
+            "Después del pago recibirás inmediatamente el enlace de Google Drive.\n"
+            "Precio: <b>{price} ⭐</b>"
+        ),
+        "guide_buy_button": "📘 Comprar guía · {price} ⭐",
+        "guide_invoice_title": "{title}",
+        "guide_invoice_description": "Guía digital con enlace de descarga",
+        "guide_payment_ok": "✅ <b>Guía comprada</b>\n\nTu enlace de descarga está abajo.",
+        "guide_already_bought": "✅ Ya compraste la guía. Tu enlace está abajo.",
+        "guide_download_button": "📥 Descargar guía",
+        "guide_unavailable": "La compra de la guía no está disponible temporalmente.",
+        "guide_not_bought": "Todavía no has comprado la guía. Puedes comprarla abajo.",
         "invoice_title": "Suscripción: {title}",
         "invoice_description": "Acceso al canal privado durante {days} días",
         "payment_invalid": "Esta factura no es válida o ha caducado. Crea una nueva.",
@@ -137,6 +178,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "help": (
             "<b>Comandos</b>\n"
             "/plans — planes y compra\n"
+            "/guide — comprar o descargar la guía\n"
             "/my — estado de suscripción\n"
             "/invite — nuevo enlace al canal\n"
             "/promo CODE — activar un código\n"
